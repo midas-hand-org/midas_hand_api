@@ -9,6 +9,7 @@ import logging
 import time
 
 from . import HandConfig, MidasHand
+from .homing import home_thumb
 
 
 def main() -> None:
@@ -21,6 +22,7 @@ def main() -> None:
         help="Comma-separated motor IDs",
     )
     parser.add_argument("--configure", action="store_true", help="Apply PID/current settings")
+    parser.add_argument("--home", action="store_true", help="Run thumb homing sequence and save config")
     parser.add_argument("--config", default=None, help="Path to a saved config YAML")
     args = parser.parse_args()
 
@@ -65,6 +67,11 @@ def main() -> None:
             print(f"Unexpected model numbers: {unexpected}")
         if args.configure:
             hand.configure(enable_torque=True)
+
+        if args.home:
+            hand.configure(enable_torque=True)
+            home_thumb(hand)
+            return
 
         try:
             while True:

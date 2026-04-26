@@ -65,6 +65,6 @@ limits in `HandConfig` for the actual Midas hand mechanics.
 - Resolution: 4096 counts/rev
 - Default baudrate: `1_000_000`
 - Operating mode: current-based position control, value `5`
-- Model number checked by `verify_models()`: `1701`
+- Model number checked by `verify_models()`: `1710`
 - Current unit: about `1 mA`
-- Goal current limit default: `350`, max allowed by config: `910`
+- Goal current limit default: `500`, max allowed by config: `910`

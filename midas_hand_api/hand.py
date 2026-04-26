@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -127,6 +128,81 @@ class MidasHand:
         self.curr_pos = commanded.copy()
         self._client().write_desired_pos(self.motor_ids, raw_space)
 
+    def set_positions_blocking(
+        self,
+        positions_rad: Sequence[float],
+        clip: bool = True,
+        tolerance_rad: float = 0.03,
+        velocity_threshold_rad_s: Optional[float] = None,
+        timeout_s: float = 5.0,
+        poll_interval_s: float = 0.02,
+        contact_current_ma: Optional[float] = None,
+    ) -> None:
+        """Command positions and block until active motors reach them.
+
+        This is intended for homing, resets, demos, and scripted motion. Learned
+        controllers should usually call :meth:`set_positions` at a fixed rate.
+        If ``contact_current_ma`` is set, the wait exits early when any motor
+        exceeds that current, which is useful for contact-aware hand motions.
+        """
+
+        commanded = np.asarray(positions_rad, dtype=np.float64)
+        if len(commanded) != len(self.motor_ids):
+            raise ValueError(f"Expected {len(self.motor_ids)} positions")
+        if clip:
+            commanded = self.clip_positions(commanded)
+
+        self.set_positions(commanded, clip=False)
+        if not self.wait_until_reached(
+            commanded,
+            tolerance_rad=tolerance_rad,
+            velocity_threshold_rad_s=velocity_threshold_rad_s,
+            timeout_s=timeout_s,
+            poll_interval_s=poll_interval_s,
+            contact_current_ma=contact_current_ma,
+        ):
+            raise TimeoutError(
+                f"Motors did not reach target within {timeout_s:.2f}s"
+            )
+
+    def wait_until_reached(
+        self,
+        positions_rad: Sequence[float],
+        tolerance_rad: float = 0.03,
+        velocity_threshold_rad_s: Optional[float] = None,
+        timeout_s: float = 5.0,
+        poll_interval_s: float = 0.02,
+        contact_current_ma: Optional[float] = None,
+    ) -> bool:
+        """Wait until active motors are near ``positions_rad``.
+
+        Returns ``True`` when all active motors are within ``tolerance_rad`` and,
+        if requested, below ``velocity_threshold_rad_s``. Returns ``False`` on
+        timeout or contact-current early exit.
+        """
+
+        target = np.asarray(positions_rad, dtype=np.float64)
+        if len(target) != len(self.motor_ids):
+            raise ValueError(f"Expected {len(self.motor_ids)} positions")
+
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            pos, vel, cur = self._read_motor_pos_vel_cur()
+            position_reached = np.all(np.abs(target - pos) <= tolerance_rad)
+            velocity_settled = (
+                True
+                if velocity_threshold_rad_s is None
+                else np.all(np.abs(vel) <= velocity_threshold_rad_s)
+            )
+            if position_reached and velocity_settled:
+                return True
+            if contact_current_ma is not None and np.any(
+                np.abs(cur) >= contact_current_ma
+            ):
+                return False
+            time.sleep(poll_interval_s)
+        return False
+
     def set_normalized(self, values: Sequence[float]) -> None:
         """Command joints from normalized ``[-1, 1]`` values."""
 
@@ -146,9 +222,7 @@ class MidasHand:
         Active joints are read from hardware; passive DIP joints are estimated
         via the placeholder coupling in :mod:`midas_hand_api.kinematics`.
         """
-        raw_positions = self._client().read_pos()
-        motor_pos = (raw_positions - self.config.home_offsets_array) * self.config.joint_signs_array
-        return self._expand_positions(motor_pos)
+        return self._expand_positions(self._read_motor_pos())
 
     def read_vel(self) -> np.ndarray:
         """Return joint velocities in rad/s for all 16 DOF.
@@ -156,9 +230,7 @@ class MidasHand:
         Passive DIP velocities are estimated from the PIP velocity via the
         placeholder coupling in :mod:`midas_hand_api.kinematics`.
         """
-        raw_velocities = self._client().read_vel()
-        motor_vel = raw_velocities * self.config.joint_signs_array
-        return self._expand_velocities(motor_vel)
+        return self._expand_velocities(self._read_motor_vel())
 
     def read_cur(self) -> np.ndarray:
         """Return motor currents in mA for the 13 active motors."""
@@ -166,17 +238,39 @@ class MidasHand:
 
     def read_pos_vel(self) -> Tuple[np.ndarray, np.ndarray]:
         """Return (positions, velocities) each expanded to 16 DOF."""
-        raw_pos, raw_vel = self._client().read_pos_vel()
-        motor_pos = (raw_pos - self.config.home_offsets_array) * self.config.joint_signs_array
-        motor_vel = raw_vel * self.config.joint_signs_array
+        motor_pos, motor_vel = self._read_motor_pos_vel()
         return self._expand_positions(motor_pos), self._expand_velocities(motor_vel)
 
     def read_pos_vel_cur(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Return (positions 16-DOF, velocities 16-DOF, currents 13-motor)."""
-        raw_pos, raw_vel, cur = self._client().read_pos_vel_cur()
-        motor_pos = (raw_pos - self.config.home_offsets_array) * self.config.joint_signs_array
-        motor_vel = raw_vel * self.config.joint_signs_array
+        motor_pos, motor_vel, cur = self._read_motor_pos_vel_cur()
         return self._expand_positions(motor_pos), self._expand_velocities(motor_vel), cur
+
+    def _read_motor_pos(self) -> np.ndarray:
+        raw_positions = self._client().read_pos()
+        return (
+            raw_positions - self.config.home_offsets_array
+        ) * self.config.joint_signs_array
+
+    def _read_motor_vel(self) -> np.ndarray:
+        raw_velocities = self._client().read_vel()
+        return raw_velocities * self.config.joint_signs_array
+
+    def _read_motor_pos_vel(self) -> Tuple[np.ndarray, np.ndarray]:
+        raw_pos, raw_vel = self._client().read_pos_vel()
+        motor_pos = (
+            raw_pos - self.config.home_offsets_array
+        ) * self.config.joint_signs_array
+        motor_vel = raw_vel * self.config.joint_signs_array
+        return motor_pos, motor_vel
+
+    def _read_motor_pos_vel_cur(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        raw_pos, raw_vel, cur = self._client().read_pos_vel_cur()
+        motor_pos = (
+            raw_pos - self.config.home_offsets_array
+        ) * self.config.joint_signs_array
+        motor_vel = raw_vel * self.config.joint_signs_array
+        return motor_pos, motor_vel, cur
 
     def _expand_positions(self, motor_pos: np.ndarray) -> np.ndarray:
         """Expand 13-motor positions to 16-DOF joint space.
@@ -287,8 +381,45 @@ class MidasHand:
         sequence of the same length as motor_ids for per-motor values.
         """
         ids = list(motor_ids) if motor_ids is not None else self.motor_ids
-        vals = [current_ma] * len(ids) if isinstance(current_ma, int) else list(current_ma)
+        vals = (
+            [current_ma] * len(ids)
+            if np.isscalar(current_ma)
+            else list(current_ma)
+        )
         self._client().sync_write(ids, vals, ct.ADDR_GOAL_CURRENT, ct.LEN_GOAL_CURRENT)
+
+    def set_motion_profile(
+        self,
+        profile_velocity_rad_s: Optional[float] = None,
+        profile_acceleration_raw: Optional[int] = None,
+        motor_ids: Optional[Sequence[int]] = None,
+    ) -> None:
+        """Set Dynamixel position-profile velocity and acceleration.
+
+        ``profile_velocity_rad_s=None`` writes ``0``, which lets the actuator use
+        its unlimited velocity profile behavior. Acceleration is passed in raw
+        Dynamixel units because the exact unit is firmware/model dependent.
+        """
+
+        ids = list(motor_ids) if motor_ids is not None else self.motor_ids
+        client = self._client()
+        if profile_acceleration_raw is not None:
+            client.sync_write(
+                ids,
+                [int(profile_acceleration_raw)] * len(ids),
+                ct.ADDR_PROFILE_ACCELERATION,
+                ct.LEN_PROFILE_ACCELERATION,
+            )
+        if profile_velocity_rad_s is not None:
+            raw_vel = max(1, int(profile_velocity_rad_s / client.vel_scale))
+        else:
+            raw_vel = 0
+        client.sync_write(
+            ids,
+            [raw_vel] * len(ids),
+            ct.ADDR_PROFILE_VELOCITY,
+            ct.LEN_PROFILE_VELOCITY,
+        )
 
     def close(self, disable_torque: bool = True) -> None:
         if self.dxl_client:

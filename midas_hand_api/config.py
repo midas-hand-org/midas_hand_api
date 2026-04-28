@@ -5,7 +5,7 @@ from __future__ import annotations
 import pathlib
 from dataclasses import dataclass, field
 from math import pi
-from typing import Optional, Sequence, Tuple, Union
+from typing import Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import yaml  # pyyaml
@@ -32,6 +32,36 @@ DEFAULT_PIP_MOTOR_INDICES: Tuple[int, ...] = (4, 7, 10)
 
 def _repeat(value: float, n: int) -> Tuple[float, ...]:
     return tuple(value for _ in range(n))
+
+
+def _coerce_motor_values(
+    values: Union[Sequence[float], Mapping[Union[int, str], float]],
+    motor_ids: Sequence[int],
+    name: str,
+) -> Tuple[float, ...]:
+    """Return motor-indexed values ordered to match ``motor_ids``.
+
+    Saved configs may store calibration fields as ``{motor_id: value}`` for
+    robustness. Runtime math uses tuples/arrays aligned with ``motor_ids``.
+    """
+
+    if isinstance(values, Mapping):
+        ordered = []
+        for motor_id in motor_ids:
+            if motor_id in values:
+                ordered.append(float(values[motor_id]))
+            elif str(motor_id) in values:
+                ordered.append(float(values[str(motor_id)]))
+            else:
+                raise ValueError(f"{name} is missing value for motor ID {motor_id}")
+        return tuple(ordered)
+    return tuple(float(value) for value in values)
+
+
+def _motor_value_map(
+    motor_ids: Sequence[int], values: Sequence[float]
+) -> dict[int, float]:
+    return {int(motor_id): float(value) for motor_id, value in zip(motor_ids, values)}
 
 
 @dataclass(frozen=True)
@@ -80,6 +110,21 @@ class HandConfig:
     joint_upper_limits: Sequence[float] = field(
         default_factory=lambda: _repeat(pi, len(DEFAULT_MOTOR_IDS))
     )
+
+    def __post_init__(self) -> None:
+        motor_ids = tuple(int(motor_id) for motor_id in self.motor_ids)
+        object.__setattr__(self, "motor_ids", motor_ids)
+        for name in (
+            "home_offsets",
+            "joint_signs",
+            "joint_lower_limits",
+            "joint_upper_limits",
+        ):
+            object.__setattr__(
+                self,
+                name,
+                _coerce_motor_values(getattr(self, name), motor_ids, name),
+            )
 
     @property
     def n_motors(self) -> int:
@@ -209,11 +254,91 @@ class HandConfig:
             "counts_per_rev": self.counts_per_rev,
             "velocity_unit_rpm": float(self.velocity_unit_rpm),
             "current_unit_ma": float(self.current_unit_ma),
-            "home_offsets": [float(v) for v in self.home_offsets],
-            "joint_signs": [float(v) for v in self.joint_signs],
-            "joint_lower_limits": [float(v) for v in self.joint_lower_limits],
-            "joint_upper_limits": [float(v) for v in self.joint_upper_limits],
+            "home_offsets": _motor_value_map(self.motor_ids, self.home_offsets),
+            "joint_signs": _motor_value_map(self.motor_ids, self.joint_signs),
+            "joint_lower_limits": _motor_value_map(
+                self.motor_ids, self.joint_lower_limits
+            ),
+            "joint_upper_limits": _motor_value_map(
+                self.motor_ids, self.joint_upper_limits
+            ),
         }
+        with open(path, "w") as f:
+            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+
+    def save_merged_offsets(
+        self,
+        motor_indices: Sequence[int],
+        path: Union[str, pathlib.Path] = DEFAULT_CONFIG_PATH,
+    ) -> None:
+        """Merge selected home offsets into an existing YAML config.
+
+        Homing may be run on only part of the hand. This method preserves
+        existing calibration entries for other motors and updates/replaces only
+        the successfully homed motor IDs.
+        """
+
+        path = pathlib.Path(path)
+        if path.exists():
+            with open(path) as f:
+                data = yaml.safe_load(f) or {}
+        else:
+            data = {}
+
+        data.setdefault("motor_ids", list(self.motor_ids))
+        existing_ids = [int(motor_id) for motor_id in data.get("motor_ids", [])]
+        for motor_id in self.motor_ids:
+            if int(motor_id) not in existing_ids:
+                existing_ids.append(int(motor_id))
+        data["motor_ids"] = existing_ids
+
+        for key, values in (
+            ("home_offsets", self.home_offsets),
+            ("joint_signs", self.joint_signs),
+            ("joint_lower_limits", self.joint_lower_limits),
+            ("joint_upper_limits", self.joint_upper_limits),
+        ):
+            existing = data.get(key, {})
+            if isinstance(existing, list):
+                existing = {
+                    int(motor_id): float(value)
+                    for motor_id, value in zip(data["motor_ids"], existing)
+                }
+            else:
+                existing = {
+                    int(motor_id): float(value)
+                    for motor_id, value in existing.items()
+                }
+
+            if key == "home_offsets":
+                indices_to_write = motor_indices
+                for index in indices_to_write:
+                    existing[int(self.motor_ids[index])] = float(values[index])
+            else:
+                for index, motor_id in enumerate(self.motor_ids):
+                    existing.setdefault(int(motor_id), float(values[index]))
+            data[key] = existing
+
+        for key, value in {
+            "motor_model": self.motor_model,
+            "expected_model_number": self.expected_model_number,
+            "port": self.port,
+            "baudrate": self.baudrate,
+            "passive_joint_indices": list(self.passive_joint_indices),
+            "pip_motor_indices": list(self.pip_motor_indices),
+            "position_p_gain": self.position_p_gain,
+            "position_i_gain": self.position_i_gain,
+            "position_d_gain": self.position_d_gain,
+            "goal_current_limit": self.goal_current_limit,
+            "max_goal_current_limit": self.max_goal_current_limit,
+            "operating_mode": self.operating_mode,
+            "counts_per_rev": self.counts_per_rev,
+            "velocity_unit_rpm": float(self.velocity_unit_rpm),
+            "current_unit_ma": float(self.current_unit_ma),
+        }.items():
+            data.setdefault(key, value)
+
+        path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 

@@ -102,6 +102,11 @@ class MidasHand:
 
         return self._client().ping(self.motor_ids)
 
+    def read_hardware_error_status(self) -> dict[int, int]:
+        """Return Hardware Error Status(70) for active motors."""
+
+        return self._client().read_hardware_error_status(self.motor_ids)
+
     def verify_models(self) -> dict[int, int]:
         """Return responding motors whose model number differs from config."""
 

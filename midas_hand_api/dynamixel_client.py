@@ -19,6 +19,7 @@ from . import control_table as ct
 
 
 Number = Union[int, float]
+DXL_ALERT_BIT = 0x80
 
 
 def signed_to_unsigned(value: int, size: int) -> int:
@@ -150,6 +151,17 @@ class DynamixelClient:
         if comm_result != self.dxl.COMM_SUCCESS:
             error_message = self.packet_handler.getTxRxResult(comm_result)
         elif dxl_error:
+            alert_only = (dxl_error & DXL_ALERT_BIT) and (
+                dxl_error & ~DXL_ALERT_BIT
+            ) == 0
+            if alert_only:
+                message = self.packet_handler.getRxPacketError(dxl_error)
+                if dxl_id is not None:
+                    message = f"[Motor ID {dxl_id}] {message}"
+                if context:
+                    message = f"{context}: {message}"
+                logging.warning(message)
+                return True
             error_message = self.packet_handler.getRxPacketError(dxl_error)
 
         if not error_message:
@@ -171,8 +183,13 @@ class DynamixelClient:
             model, comm_result, dxl_error = self.packet_handler.ping(
                 self.port_handler, int(motor_id)
             )
-            if self.handle_packet_result(comm_result, dxl_error, int(motor_id), "ping"):
+            if comm_result == self.dxl.COMM_SUCCESS:
                 found[int(motor_id)] = int(model)
+                if dxl_error:
+                    error = self.packet_handler.getRxPacketError(dxl_error)
+                    logging.warning("ping: [Motor ID %s] %s", motor_id, error)
+            else:
+                self.handle_packet_result(comm_result, dxl_error, int(motor_id), "ping")
         return found
 
     def set_torque_enabled(
@@ -204,6 +221,27 @@ class DynamixelClient:
             ):
                 errored.append(int(motor_id))
         return errored
+
+    def read_byte_data(self, motor_ids: Sequence[int], address: int) -> Dict[int, int]:
+        self.check_connected()
+        values: Dict[int, int] = {}
+        for motor_id in motor_ids:
+            value, comm_result, dxl_error = self.packet_handler.read1ByteTxRx(
+                self.port_handler, int(motor_id), int(address)
+            )
+            if self.handle_packet_result(
+                comm_result, dxl_error, int(motor_id), "read_byte"
+            ):
+                values[int(motor_id)] = int(value)
+        return values
+
+    def read_hardware_error_status(
+        self, motor_ids: Optional[Sequence[int]] = None
+    ) -> Dict[int, int]:
+        return self.read_byte_data(
+            list(motor_ids) if motor_ids is not None else self.motor_ids,
+            ct.ADDR_HARDWARE_ERROR_STATUS,
+        )
 
     def sync_write(
         self,

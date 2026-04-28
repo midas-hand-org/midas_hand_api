@@ -20,8 +20,29 @@ def main() -> None:
 
     with MidasHand(config) as hand:
         print(f"Connected on: {hand.port}")
-        print(f"Ping result: {hand.ping()}")
+        ping_result = hand.ping()
+        print(f"Ping result: {ping_result}")
+
+    if not ping_result:
+        print("No motors responded.")
+        return
+
+    responding_ids = tuple(sorted(ping_result.keys()))
+    if responding_ids != motor_ids:
+        print(f"Re-running read checks with responding IDs only: {responding_ids}")
+        config = HandConfig.xm335_t323(
+            motor_ids=responding_ids, port=args.port, baudrate=args.baudrate
+        )
+
+    with MidasHand(config) as hand:
         print(f"Unexpected model numbers: {hand.verify_models()}")
+        hardware_errors = {
+            motor_id: status
+            for motor_id, status in hand.read_hardware_error_status().items()
+            if status
+        }
+        if hardware_errors:
+            print(f"Hardware Error Status(70): {hardware_errors}")
         print(f"Positions rad: {hand.read_pos()}")
 
 

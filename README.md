@@ -29,12 +29,64 @@ ls /dev/serial/by-id/*
 
 ```bash
 source .venv/bin/activate
-python examples/smoke_test.py --port /dev/ttyUSB0 --baudrate 1000000 --motors 0,1,2,3
+python examples/smoke_test.py --port /dev/ttyUSB0 --baudrate 1000000
 ```
 
-If your motor IDs or baudrate differ, update the command. Do not leave
+By default, the smoke test uses motor IDs `0` through `12`. If you only want to
+test a subset, pass `--motors`, for example `--motors 0,1,2,3`. Do not leave
 Dynamixel Wizard open while running the API because it keeps the serial port
 busy.
+
+## First-Time Homing
+
+After assembling the hand and confirming communication with the smoke test, run
+homing before commanding normal poses. Homing drives each calibrated joint toward
+its hard stop, computes the software zero from the CAD offset, and saves the
+resulting calibration. After the homing sequence completes, the hand commands
+all fingers to their software `0` position.
+
+```bash
+source .venv/bin/activate
+python -m midas_hand_api --port /dev/ttyUSB0 --baudrate 1000000 --home
+```
+
+By default, this targets motor IDs `0` through `12`. Use `--motors` if you want
+to home or debug a subset supported by the current homing routine.
+Use `--home-thumb` or `--home-fingers` instead of `--home` for partial homing.
+
+By default, the saved config is written to:
+
+```text
+~/.midas_hand/config.yaml
+```
+
+Run homing on the first startup after assembly, after changing actuator horns or
+linkages, or whenever the physical relationship between motor raw position and
+joint zero changes. You do not need to home on every program start if the hand
+has not been reassembled; load the saved config instead.
+
+Saved calibration files store motor-aligned fields keyed by motor ID:
+
+```yaml
+motor_ids:
+- 0
+- 1
+- 2
+- 3
+# ...
+- 12
+home_offsets:
+  0: 3.169204308748572
+  1: 3.1461945992939455
+  2: 1.888330344497239
+  3: 1.842310926250655
+  # ...
+  12: 0.0
+```
+
+At runtime, these maps are converted into arrays ordered to match `motor_ids`.
+`home_offsets` are raw actuator positions, in radians, where the software joint
+position is defined as zero.
 
 ## Example
 
@@ -42,11 +94,7 @@ busy.
 from midas_hand_api import HandConfig, MidasHand
 import numpy as np
 
-config = HandConfig.xm335_t323(
-    motor_ids=tuple(range(0, 13)),
-    port="/dev/ttyUSB0",
-    baudrate=1_000_000,
-)
+config = HandConfig.load()
 
 with MidasHand(config) as hand:
     print(hand.ping())
@@ -56,8 +104,8 @@ with MidasHand(config) as hand:
     print(hand.read_pos_vel_cur())
 ```
 
-Before using real grasps, calibrate `home_offsets`, `joint_signs`, and joint
-limits in `HandConfig` for the actual Midas hand mechanics.
+Before using real grasps, calibrate `joint_signs` and joint limits in
+`HandConfig` for the actual Midas hand mechanics.
 
 ## XM335-T323-T Defaults
 

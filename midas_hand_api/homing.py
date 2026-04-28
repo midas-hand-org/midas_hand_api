@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import time
-from typing import Optional
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -22,6 +22,27 @@ THUMB_HOMING_TABLE = [
     (2, "Thumb CMC flex", -0.88510692, +1),
     (3, "Thumb CMC abduct", 0.0, -1),
 ]
+
+FINGER_HOMING_TABLE = [
+    (4, "Index PIP", 0.0, +1),
+    (5, "Index MCP flex", -0.05, +1),
+    (6, "Index MCP abduct", 0.8, -1),
+    (7, "Middle PIP", 0.0, +1),
+    (8, "Middle MCP flex", -0.05, +1),
+    (9, "Middle MCP abduct", 0.8, -1),
+    (10, "Ring PIP", 0.0, +1),
+    (11, "Ring MCP flex", -0.05, +1),
+    (12, "Ring MCP abduct", -0.8, -1),
+]
+
+INDEX_FINGER_HOMING_TABLE = FINGER_HOMING_TABLE[0:3]
+MIDDLE_FINGER_PRE_ABDUCT_HOMING_TABLE = FINGER_HOMING_TABLE[3:5]
+MIDDLE_FINGER_ABDUCT_HOMING_TABLE = FINGER_HOMING_TABLE[5:6]
+RING_FINGER_HOMING_TABLE = FINGER_HOMING_TABLE[6:9]
+MIDDLE_MCP_FLEX_MOTOR_ID = 8
+MIDDLE_MCP_FLEX_PRE_ABDUCT_POSITION_RAD = -0.5 * np.pi
+
+HomingEntry = Tuple[int, str, float, int]
 
 
 def home_motor(
@@ -181,27 +202,245 @@ def home_thumb(
 
     Pass any home_motor keyword argument (e.g. current_threshold_ma=200) via **kwargs.
     """
-    offsets = list(hand.config.home_offsets)
-    homed_motor_indices = []
+    return _home_table(
+        hand,
+        THUMB_HOMING_TABLE,
+        "thumb",
+        save=save,
+        check_connected=True,
+        **kwargs,
+    )
 
-    for motor_id, joint_name, cad_offset, direction in THUMB_HOMING_TABLE:
+
+def home_fingers(
+    hand: MidasHand,
+    save: bool = True,
+    **kwargs,
+) -> HandConfig:
+    """Home index, middle, and ring finger motors."""
+    return _home_finger_sequence(hand, "finger", save=save, **kwargs)
+
+
+def home_hand(
+    hand: MidasHand,
+    save: bool = True,
+    **kwargs,
+) -> HandConfig:
+    """Home thumb plus index, middle, and ring finger motors."""
+    offsets = list(hand.config.home_offsets)
+    offsets, homed_motor_indices = _home_entries(
+        hand, THUMB_HOMING_TABLE, "thumb", offsets, **kwargs
+    )
+    return _home_finger_sequence(
+        hand,
+        "hand",
+        save=save,
+        initial_offsets=offsets,
+        initial_homed_motor_indices=homed_motor_indices,
+        **kwargs,
+    )
+
+
+def _home_finger_sequence(
+    hand: MidasHand,
+    label: str,
+    save: bool = True,
+    initial_offsets: Optional[Sequence[float]] = None,
+    initial_homed_motor_indices: Optional[Sequence[int]] = None,
+    **kwargs,
+) -> HandConfig:
+    offsets = list(initial_offsets or hand.config.home_offsets)
+    homed_motor_indices = list(initial_homed_motor_indices or [])
+
+    for table, table_label in (
+        (INDEX_FINGER_HOMING_TABLE, "index finger"),
+        (MIDDLE_FINGER_PRE_ABDUCT_HOMING_TABLE, "middle finger"),
+    ):
+        offsets, new_indices = _home_entries(hand, table, table_label, offsets, **kwargs)
+        homed_motor_indices.extend(new_indices)
+
+    _set_middle_mcp_flex_for_abduction(hand, offsets)
+
+    offsets, new_indices = _home_entries(
+        hand,
+        MIDDLE_FINGER_ABDUCT_HOMING_TABLE,
+        "middle finger abduction",
+        offsets,
+        **kwargs,
+    )
+    homed_motor_indices.extend(new_indices)
+
+    offsets, new_indices = _home_entries(
+        hand, RING_FINGER_HOMING_TABLE, "ring finger", offsets, **kwargs
+    )
+    homed_motor_indices.extend(new_indices)
+
+    return _finish_homing(hand, offsets, homed_motor_indices, label, save)
+
+
+def _home_table(
+    hand: MidasHand,
+    table: Sequence[HomingEntry],
+    label: str,
+    save: bool = True,
+    check_connected: bool = True,
+    **kwargs,
+) -> HandConfig:
+    offsets = list(hand.config.home_offsets)
+    offsets, homed_motor_indices = _home_entries(
+        hand,
+        table,
+        label,
+        offsets,
+        check_connected=check_connected,
+        **kwargs,
+    )
+    return _finish_homing(hand, offsets, homed_motor_indices, label, save)
+
+
+def _home_entries(
+    hand: MidasHand,
+    table: Sequence[HomingEntry],
+    label: str,
+    offsets: list[float],
+    check_connected: bool = True,
+    **kwargs,
+) -> Tuple[list[float], list[int]]:
+    homed_motor_indices = []
+    table_motor_ids = [entry[0] for entry in table]
+    configured_table_ids = [motor_id for motor_id in table_motor_ids if motor_id in hand.motor_ids]
+    connected_ids = set(table_motor_ids)
+
+    if check_connected:
+        ping_result = hand.ping()
+        connected_ids = set(ping_result)
+        expected_ids = set(configured_table_ids)
+        missing_expected = sorted(expected_ids - connected_ids)
+        if missing_expected:
+            print(
+                f"ERROR: Missing {label} motor IDs: {missing_expected}. "
+                "They will be skipped."
+            )
+
+    for motor_id, joint_name, cad_offset, direction in table:
         if motor_id not in hand.motor_ids:
             print(f"Skipping motor {motor_id} ({joint_name}): not in connected motors")
+            continue
+        if motor_id not in connected_ids:
+            print(f"Skipping motor {motor_id} ({joint_name}): no ping response")
             continue
         print(f"Homing motor {motor_id} ({joint_name})...")
         motor_idx = hand.motor_ids.index(motor_id)
         offsets[motor_idx] = home_motor(hand, motor_id, direction, cad_offset, **kwargs)
         homed_motor_indices.append(motor_idx)
 
+    return offsets, homed_motor_indices
+
+
+def _finish_homing(
+    hand: MidasHand,
+    offsets: Sequence[float],
+    homed_motor_indices: Sequence[int],
+    label: str,
+    save: bool,
+) -> HandConfig:
     new_config = dataclasses.replace(hand.config, home_offsets=tuple(offsets))
     hand.config = new_config
 
     if not homed_motor_indices:
-        print("No thumb motors were homed.")
+        print(f"No {label} motors were homed.")
         return new_config
 
+    _move_homed_motors_to_zero(hand, homed_motor_indices)
+
+    if save:
+        new_config.save_merged_offsets(homed_motor_indices)
+        print(f"Config saved -> {DEFAULT_CONFIG_PATH}")
+
+    time.sleep(2.0)
+
+    return new_config
+
+
+def _set_middle_mcp_flex_for_abduction(
+    hand: MidasHand,
+    home_offsets: Sequence[float],
+) -> None:
+    if MIDDLE_MCP_FLEX_MOTOR_ID not in hand.motor_ids:
+        print(
+            "Skipping middle MCP flex pre-abduction move: "
+            f"motor {MIDDLE_MCP_FLEX_MOTOR_ID} is not configured"
+        )
+        return
+
+    motor_idx = hand.motor_ids.index(MIDDLE_MCP_FLEX_MOTOR_ID)
+    print("Moving Middle MCP flex to -90 deg before Middle MCP abduct homing...")
+    _set_single_motor_position_blocking(
+        hand,
+        motor_idx,
+        MIDDLE_MCP_FLEX_PRE_ABDUCT_POSITION_RAD,
+        home_offset_rad=home_offsets[motor_idx],
+        tolerance_rad=0.035,
+        velocity_threshold_rad_s=0.05,
+        timeout_s=8.0,
+        poll_interval_s=0.01,
+    )
+
+
+def _set_single_motor_position_blocking(
+    hand: MidasHand,
+    motor_idx: int,
+    target_rad: float,
+    home_offset_rad: float,
+    tolerance_rad: float,
+    velocity_threshold_rad_s: float,
+    timeout_s: float,
+    poll_interval_s: float,
+) -> None:
+    motor_id = hand.motor_ids[motor_idx]
+    raw_target = (
+        target_rad * hand.config.joint_signs_array[motor_idx]
+    ) + home_offset_rad
+    hand.set_motion_profile(
+        profile_velocity_rad_s=0.3,
+        profile_acceleration_raw=20,
+        motor_ids=[motor_id],
+    )
+    hand._client().write_desired_pos([motor_id], [raw_target])
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        raw_pos = hand._client().read_pos()[motor_idx]
+        pos = (raw_pos - home_offset_rad) * hand.config.joint_signs_array[motor_idx]
+        vel = hand._read_motor_vel()[motor_idx]
+        if (
+            abs(pos - target_rad) <= tolerance_rad
+            and abs(vel) <= velocity_threshold_rad_s
+        ):
+            hand.set_motion_profile(
+                profile_velocity_rad_s=None,
+                profile_acceleration_raw=0,
+                motor_ids=[motor_id],
+            )
+            return
+        time.sleep(poll_interval_s)
+
+    hand.set_motion_profile(
+        profile_velocity_rad_s=None,
+        profile_acceleration_raw=0,
+        motor_ids=[motor_id],
+    )
+    raise TimeoutError(
+        f"Motor {motor_id} did not reach {target_rad:.3f} rad within {timeout_s:.2f}s"
+    )
+
+
+def _move_homed_motors_to_zero(
+    hand: MidasHand,
+    homed_motor_indices: Sequence[int],
+) -> None:
     time.sleep(0.1)
-    print("Moving to software zero...")
+    print("Moving homed motors to software zero...")
     target = hand._read_motor_pos()
     target[homed_motor_indices] = 0.0
     hand.set_motion_profile(profile_velocity_rad_s=0.3, profile_acceleration_raw=20)
@@ -213,11 +452,3 @@ def home_thumb(
         poll_interval_s=0.01,
     )
     hand.set_motion_profile(profile_velocity_rad_s=None, profile_acceleration_raw=0)
-
-    if save:
-        new_config.save()
-        print(f"Config saved -> {DEFAULT_CONFIG_PATH}")
-    
-    time.sleep(2.0)
-
-    return new_config

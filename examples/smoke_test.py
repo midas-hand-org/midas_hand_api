@@ -30,9 +30,7 @@ def main() -> None:
     responding_ids = tuple(sorted(ping_result.keys()))
     if responding_ids != motor_ids:
         print(f"Re-running read checks with responding IDs only: {responding_ids}")
-        config = HandConfig.xm335_t323(
-            motor_ids=responding_ids, port=args.port, baudrate=args.baudrate
-        )
+        config = config.subset(responding_ids)
 
     with MidasHand(config) as hand:
         print(f"Unexpected model numbers: {hand.verify_models()}")

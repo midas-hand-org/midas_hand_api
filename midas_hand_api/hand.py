@@ -7,23 +7,28 @@ from typing import Optional, Sequence, Tuple, Union
 
 import numpy as np
 
-from . import control_table as ct
 from . import kinematics
+from .actuators import control_table as ct
+from .actuators.dynamixel_client import DynamixelClient, discover_ports
 from .config import HandConfig
-from .dynamixel_client import DynamixelClient, discover_ports
+from .tactile import PaxiniSensor, TactileFrame
 
 
 class MidasHand:
     """Convenience wrapper around a group of Dynamixel hand motors."""
 
-    def __init__(self, config: Optional[HandConfig] = None, autoconnect: bool = True):
+    def __init__(
+        self,
+        config: Optional[HandConfig] = None,
+        autoconnect: bool = True,
+        tactile_sensor: Optional[PaxiniSensor] = None,
+    ):
         self.config = config or HandConfig()
         self.config.validate()
         self.motor_ids = list(self.config.motor_ids)
         self.port = self.config.port
         self.dxl_client: Optional[DynamixelClient] = None
-        self.curr_pos = np.zeros(len(self.motor_ids), dtype=np.float64)
-        self.prev_pos = self.curr_pos.copy()
+        self.tactile_sensor = tactile_sensor
         if autoconnect:
             self.connect()
 
@@ -58,6 +63,10 @@ class MidasHand:
     @property
     def is_connected(self) -> bool:
         return bool(self.dxl_client and self.dxl_client.is_connected)
+
+    @property
+    def has_tactile(self) -> bool:
+        return self.tactile_sensor is not None
 
     def configure(self, enable_torque: bool = True) -> None:
         """Apply operating mode, gains, and current caps to all motors."""
@@ -129,8 +138,6 @@ class MidasHand:
         raw_space = (
             commanded * self.config.joint_signs_array
         ) + self.config.home_offsets_array
-        self.prev_pos = self.curr_pos
-        self.curr_pos = commanded.copy()
         self._client().write_desired_pos(self.motor_ids, raw_space)
 
     def set_positions_blocking(
@@ -251,11 +258,15 @@ class MidasHand:
         motor_pos, motor_vel, cur = self._read_motor_pos_vel_cur()
         return self._expand_positions(motor_pos), self._expand_velocities(motor_vel), cur
 
+    def read_tactile(self) -> TactileFrame:
+        """Return one tactile frame from the configured tactile sensor."""
+
+        if self.tactile_sensor is None:
+            raise OSError("No tactile sensor is configured")
+        return self.tactile_sensor.read_frame()
+
     def _read_motor_pos(self) -> np.ndarray:
-        raw_positions = self._client().read_pos()
-        return (
-            raw_positions - self.config.home_offsets_array
-        ) * self.config.joint_signs_array
+        return self._raw_to_motor_pos(self._client().read_pos())
 
     def _read_motor_vel(self) -> np.ndarray:
         raw_velocities = self._client().read_vel()
@@ -263,19 +274,20 @@ class MidasHand:
 
     def _read_motor_pos_vel(self) -> Tuple[np.ndarray, np.ndarray]:
         raw_pos, raw_vel = self._client().read_pos_vel()
-        motor_pos = (
-            raw_pos - self.config.home_offsets_array
-        ) * self.config.joint_signs_array
+        motor_pos = self._raw_to_motor_pos(raw_pos)
         motor_vel = raw_vel * self.config.joint_signs_array
         return motor_pos, motor_vel
 
     def _read_motor_pos_vel_cur(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         raw_pos, raw_vel, cur = self._client().read_pos_vel_cur()
-        motor_pos = (
-            raw_pos - self.config.home_offsets_array
-        ) * self.config.joint_signs_array
+        motor_pos = self._raw_to_motor_pos(raw_pos)
         motor_vel = raw_vel * self.config.joint_signs_array
         return motor_pos, motor_vel, cur
+
+    def _raw_to_motor_pos(self, raw_pos: np.ndarray) -> np.ndarray:
+        return (
+            raw_pos - self.config.home_offsets_array
+        ) * self.config.joint_signs_array
 
     def _expand_positions(self, motor_pos: np.ndarray) -> np.ndarray:
         """Expand 13-motor positions to 16-DOF joint space.
@@ -429,6 +441,8 @@ class MidasHand:
     def close(self, disable_torque: bool = True) -> None:
         if self.dxl_client:
             self.dxl_client.disconnect(disable_torque=disable_torque)
+        if self.tactile_sensor:
+            self.tactile_sensor.close()
 
     def _client(self) -> DynamixelClient:
         if not self.dxl_client:
@@ -448,11 +462,3 @@ def scale(value, lower, upper):
     """Map ``[-1, 1]`` to ``[lower, upper]``."""
 
     return 0.5 * (np.asarray(value, dtype=np.float64) + 1.0) * (upper - lower) + lower
-
-
-def unscale(value, lower, upper):
-    """Map ``[lower, upper]`` to ``[-1, 1]``."""
-
-    return (2.0 * np.asarray(value, dtype=np.float64) - upper - lower) / (
-        upper - lower
-    )

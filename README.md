@@ -4,6 +4,20 @@ Python API for a Dynamixel-based hand using XM335-T323-T actuators. The
 structure follows the LEAP Hand Python API: a low-level Dynamixel client plus a
 higher-level hand object.
 
+The package is organized around the hand rather than individual vendors:
+
+```text
+midas_hand_api/
+  actuators/   # Dynamixel client and control-table constants
+  tactile/     # Paxini tactile API surface and frame/config types
+  hand.py      # integrated high-level MidasHand facade
+  homing.py    # motor homing and saved motor calibration
+```
+
+`homing.py` is the current motor calibration workflow. A separate calibration
+package can be added later if tactile calibration grows beyond simple config
+fields.
+
 ## Setup
 
 ```bash
@@ -106,6 +120,24 @@ with MidasHand(config) as hand:
 
 Before using real grasps, calibrate `joint_signs` and joint limits in
 `HandConfig` for the actual Midas hand mechanics.
+
+## Tactile Sensors
+
+The package includes a provisional `midas_hand_api.tactile` namespace for the
+Paxini `PX6AX-GEN3-DP-S2015-Elite` sensor:
+
+```python
+from midas_hand_api import PaxiniConfig, PaxiniSensor
+
+paxini = PaxiniSensor(PaxiniConfig(port="/dev/ttyUSB1"))
+```
+
+The public Paxini pages describe product specs and communication accessories,
+but not a Python SDK or packet protocol. `PaxiniSensor` is therefore a typed
+placeholder until the vendor SDK, serial protocol, SPI adapter protocol, or
+high-speed-board protocol is available. Once that transport is implemented,
+`PaxiniSensor` can be passed into `MidasHand(tactile_sensor=paxini)` and read
+through `hand.read_tactile()`. See `docs/paxini_px6ax_notes.md`.
 
 ## XM335-T323-T Defaults
 

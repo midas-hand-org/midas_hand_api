@@ -5,13 +5,13 @@ Also runnable directly with ``python -m midas_hand_api``.
 """
 
 import argparse
-import glob
+import dataclasses
 import logging
 import time
 
 from . import HandConfig, MidasHand
-from . import control_table as ct
-from .config import DEFAULT_MOTOR_IDS
+from .actuators import control_table as ct, discover_ports
+from .config import DEFAULT_CONFIG_PATH, DEFAULT_MOTOR_IDS
 from .homing import home_fingers, home_hand, home_thumb
 
 
@@ -27,13 +27,6 @@ def _parse_id_spec(spec: str) -> list[int]:
         else:
             ids.append(int(part))
     return ids
-
-
-def _default_port() -> str:
-    ports = []
-    for pattern in ("/dev/serial/by-id/*", "/dev/ttyUSB*", "/dev/ttyACM*"):
-        ports.extend(sorted(glob.glob(pattern)))
-    return ports[0] if ports else "/dev/ttyUSB0"
 
 
 def _scan_raw(
@@ -111,6 +104,11 @@ def main() -> None:
         help="Comma-separated motor IDs",
     )
     parser.add_argument("--configure", action="store_true", help="Apply PID/current settings")
+    parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Print unhomed motor positions in radians",
+    )
     parser.add_argument("--home", action="store_true", help="Run full hand homing sequence and save config")
     parser.add_argument("--home-thumb", action="store_true", help="Run thumb homing sequence and save config")
     parser.add_argument("--home-fingers", action="store_true", help="Run finger homing sequence and save config")
@@ -139,7 +137,8 @@ def main() -> None:
 
     if args.scan:
         scan_ids = _parse_id_spec(args.scan_range)
-        port = args.port or _default_port()
+        ports = discover_ports()
+        port = args.port or (ports[0] if ports else "/dev/ttyUSB0")
         baudrates = (
             [int(item) for item in args.scan_baudrates.split(",") if item]
             if args.scan_baudrates
@@ -160,6 +159,10 @@ def main() -> None:
 
     if args.config:
         config = HandConfig.load(args.config)
+    elif DEFAULT_CONFIG_PATH.exists():
+        config = HandConfig.load(DEFAULT_CONFIG_PATH)
+        if args.port:
+            config = dataclasses.replace(config, port=args.port)
     else:
         motor_ids = tuple(int(item) for item in args.motors.split(",") if item)
         config = HandConfig.xm335_t323(
@@ -186,11 +189,7 @@ def main() -> None:
         return
 
     if missing_ids:
-        config = HandConfig.xm335_t323(
-            motor_ids=tuple(responding_ids),
-            port=config.port,
-            baudrate=config.baudrate,
-        )
+        config = config.subset(responding_ids)
 
     with MidasHand(config) as hand:
         print(f"Connected on {hand.port}")
@@ -220,7 +219,10 @@ def main() -> None:
 
         try:
             while True:
-                print(f"Position: {hand.read_pos()}")
+                if args.raw:
+                    print(f"Position (raw): {hand._client().read_pos()}")
+                else:
+                    print(f"Position: {hand.read_pos()}")
                 time.sleep(0.03)
         except KeyboardInterrupt:
             pass

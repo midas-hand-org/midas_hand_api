@@ -8,7 +8,7 @@ from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
-from . import control_table as ct
+from .actuators import control_table as ct
 from .config import DEFAULT_CONFIG_PATH, HandConfig
 from .hand import MidasHand
 
@@ -32,7 +32,7 @@ FINGER_HOMING_TABLE = [
     (9, "Middle MCP abduct", 0.8, -1),
     (10, "Ring PIP", 0.0, +1),
     (11, "Ring MCP flex", -0.05, +1),
-    (12, "Ring MCP abduct", -0.8, -1),
+    (12, "Ring MCP abduct", -0.8, +1),
 ]
 
 INDEX_FINGER_HOMING_TABLE = FINGER_HOMING_TABLE[0:3]

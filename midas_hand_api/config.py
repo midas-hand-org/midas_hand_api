@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import pathlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from math import pi
 from typing import Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import yaml  # pyyaml
 
-from . import control_table as ct
+from .actuators import control_table as ct
 
 
 DEFAULT_MOTOR_IDS = tuple(range(0, 13))
@@ -28,6 +28,12 @@ DEFAULT_PASSIVE_JOINT_INDICES: Tuple[int, ...] = (5, 9, 13)
 # passive DIP (same order as DEFAULT_PASSIVE_JOINT_INDICES).
 # Motor IDs 4, 7, 10 (index/middle/ring PIP) sit at array positions 4, 7, 10.
 DEFAULT_PIP_MOTOR_INDICES: Tuple[int, ...] = (4, 7, 10)
+_MOTOR_VALUE_FIELDS = (
+    "home_offsets",
+    "joint_signs",
+    "joint_lower_limits",
+    "joint_upper_limits",
+)
 
 
 def _repeat(value: float, n: int) -> Tuple[float, ...]:
@@ -62,6 +68,37 @@ def _motor_value_map(
     motor_ids: Sequence[int], values: Sequence[float]
 ) -> dict[int, float]:
     return {int(motor_id): float(value) for motor_id, value in zip(motor_ids, values)}
+
+
+def _filtered_passive_topology(
+    source_n_motors: int,
+    source_passive_joint_indices: Sequence[int],
+    source_pip_motor_indices: Sequence[int],
+    selected_motor_indices: Sequence[int],
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    selected_old_to_new = {
+        old_index: new_index
+        for new_index, old_index in enumerate(selected_motor_indices)
+    }
+    passive_by_dof = dict(zip(source_passive_joint_indices, source_pip_motor_indices))
+
+    passive_joint_indices = []
+    pip_motor_indices = []
+    motor_index = 0
+    filtered_dof_index = 0
+    for dof_index in range(source_n_motors + len(source_passive_joint_indices)):
+        if dof_index in passive_by_dof:
+            pip_motor_index = passive_by_dof[dof_index]
+            if pip_motor_index in selected_old_to_new:
+                passive_joint_indices.append(filtered_dof_index)
+                pip_motor_indices.append(selected_old_to_new[pip_motor_index])
+                filtered_dof_index += 1
+        else:
+            if motor_index in selected_old_to_new:
+                filtered_dof_index += 1
+            motor_index += 1
+
+    return tuple(passive_joint_indices), tuple(pip_motor_indices)
 
 
 @dataclass(frozen=True)
@@ -114,12 +151,7 @@ class HandConfig:
     def __post_init__(self) -> None:
         motor_ids = tuple(int(motor_id) for motor_id in self.motor_ids)
         object.__setattr__(self, "motor_ids", motor_ids)
-        for name in (
-            "home_offsets",
-            "joint_signs",
-            "joint_lower_limits",
-            "joint_upper_limits",
-        ):
+        for name in _MOTOR_VALUE_FIELDS:
             object.__setattr__(
                 self,
                 name,
@@ -167,10 +199,8 @@ class HandConfig:
     def validate(self) -> None:
         n = len(self.motor_ids)
         motor_fields = {
-            "home_offsets": self.home_offsets,
-            "joint_signs": self.joint_signs,
-            "joint_lower_limits": self.joint_lower_limits,
-            "joint_upper_limits": self.joint_upper_limits,
+            name: getattr(self, name)
+            for name in _MOTOR_VALUE_FIELDS
         }
         for name, values in motor_fields.items():
             if len(values) != n:
@@ -199,6 +229,17 @@ class HandConfig:
         **overrides,
     ) -> "HandConfig":
         n = len(motor_ids)
+        selected_default_indices = [
+            DEFAULT_MOTOR_IDS.index(motor_id)
+            for motor_id in motor_ids
+            if motor_id in DEFAULT_MOTOR_IDS
+        ]
+        passive_joint_indices, pip_motor_indices = _filtered_passive_topology(
+            len(DEFAULT_MOTOR_IDS),
+            DEFAULT_PASSIVE_JOINT_INDICES,
+            DEFAULT_PIP_MOTOR_INDICES,
+            selected_default_indices,
+        )
         values = {
             "motor_ids": motor_ids,
             "motor_model": "XM335-T323-T",
@@ -218,15 +259,44 @@ class HandConfig:
             "joint_signs": _repeat(1.0, n),
             "joint_lower_limits": _repeat(-pi, n),
             "joint_upper_limits": _repeat(pi, n),
-            "passive_joint_indices": tuple(
-                pj
-                for pj, pm in zip(DEFAULT_PASSIVE_JOINT_INDICES, DEFAULT_PIP_MOTOR_INDICES)
-                if pm < n
-            ),
-            "pip_motor_indices": tuple(pm for pm in DEFAULT_PIP_MOTOR_INDICES if pm < n),
+            "passive_joint_indices": passive_joint_indices,
+            "pip_motor_indices": pip_motor_indices,
         }
         values.update(overrides)
         return cls(**values)
+
+    def subset(self, motor_ids: Sequence[int]) -> "HandConfig":
+        """Return this config narrowed to ``motor_ids`` while preserving calibration."""
+
+        requested_ids = set(int(motor_id) for motor_id in motor_ids)
+        selected_ids = tuple(
+            motor_id for motor_id in self.motor_ids if motor_id in requested_ids
+        )
+        selected_indices = [
+            index
+            for index, motor_id in enumerate(self.motor_ids)
+            if motor_id in requested_ids
+        ]
+        if len(selected_ids) != len(requested_ids):
+            missing = sorted(requested_ids - set(selected_ids))
+            raise ValueError(f"Cannot subset config for unknown motor IDs: {missing}")
+
+        def select(values):
+            return tuple(values[index] for index in selected_indices)
+
+        passive_joint_indices, pip_motor_indices = _filtered_passive_topology(
+            self.n_motors,
+            self.passive_joint_indices,
+            self.pip_motor_indices,
+            selected_indices,
+        )
+        return replace(
+            self,
+            motor_ids=selected_ids,
+            passive_joint_indices=passive_joint_indices,
+            pip_motor_indices=pip_motor_indices,
+            **{name: select(getattr(self, name)) for name in _MOTOR_VALUE_FIELDS},
+        )
 
     def save(self, path: Union[str, pathlib.Path] = DEFAULT_CONFIG_PATH) -> None:
         """Save this configuration to a YAML file (default: ``~/.midas_hand/config.yaml``).
@@ -292,12 +362,8 @@ class HandConfig:
                 existing_ids.append(int(motor_id))
         data["motor_ids"] = existing_ids
 
-        for key, values in (
-            ("home_offsets", self.home_offsets),
-            ("joint_signs", self.joint_signs),
-            ("joint_lower_limits", self.joint_lower_limits),
-            ("joint_upper_limits", self.joint_upper_limits),
-        ):
+        for key in _MOTOR_VALUE_FIELDS:
+            values = getattr(self, key)
             existing = data.get(key, {})
             if isinstance(existing, list):
                 existing = {
@@ -347,15 +413,15 @@ class HandConfig:
         """Load a configuration from a YAML file (default: ``~/.midas_hand/config.yaml``)."""
         with open(path) as f:
             data = yaml.safe_load(f)
-        for key in (
-            "motor_ids",
-            "passive_joint_indices",
-            "pip_motor_indices",
-            "home_offsets",
-            "joint_signs",
-            "joint_lower_limits",
-            "joint_upper_limits",
-        ):
+        for key in ("motor_ids", "passive_joint_indices", "pip_motor_indices"):
             if key in data and isinstance(data[key], list):
                 data[key] = tuple(data[key])
+        motor_ids = data.get("motor_ids", DEFAULT_MOTOR_IDS)
+        for key in _MOTOR_VALUE_FIELDS:
+            if key in data:
+                val = data[key]
+                if isinstance(val, dict):
+                    data[key] = tuple(float(val[mid]) for mid in motor_ids)
+                elif isinstance(val, list):
+                    data[key] = tuple(val)
         return cls(**data)

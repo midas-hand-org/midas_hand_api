@@ -79,7 +79,8 @@ linkages, or whenever the physical relationship between motor raw position and
 joint zero changes. You do not need to home on every program start if the hand
 has not been reassembled; load the saved config instead.
 
-Saved calibration files store motor-aligned fields keyed by motor ID:
+Saved calibration files store only hand-specific calibration fields keyed by
+motor ID:
 
 ```yaml
 motor_ids:
@@ -102,6 +103,11 @@ At runtime, these maps are converted into arrays ordered to match `motor_ids`.
 `home_offsets` are raw actuator positions, in radians, where the software joint
 position is defined as zero.
 
+Controller gains, current limits, operating mode, encoder scale, baudrate, and
+model constants are code defaults in `HandConfig.xm335_t323()`. They are not
+persisted by homing, so tuning changes in code are not hidden by stale YAML
+values.
+
 ## Example
 
 ```python
@@ -115,6 +121,8 @@ with MidasHand(config) as hand:
     print(hand.verify_models())
     hand.configure(enable_torque=True)
     hand.set_positions(np.zeros(13))
+    print(hand.read_pos())
+    print(hand.read_joint_pos())
     print(hand.read_pos_vel_cur())
 ```
 

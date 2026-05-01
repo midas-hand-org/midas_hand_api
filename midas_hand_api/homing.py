@@ -17,8 +17,8 @@ from .hand import MidasHand
 # cad_offset_rad: added to hard-stop raw position to get software zero
 # homing_direction: +1 = positive encoder direction toward hard stop, -1 = negative
 THUMB_HOMING_TABLE = [
-    (0, "Thumb IP", -1.59840798, +1),
-    (1, "Thumb MCP", -1.60300992, +1),
+    (0, "Thumb IP", 1.61221381, -1),
+    (1, "Thumb MCP", 1.4450099, -1),
     (2, "Thumb CMC flex", -0.88510692, +1),
     (3, "Thumb CMC abduct", 0.0, -1),
 ]
@@ -40,6 +40,7 @@ MIDDLE_FINGER_PRE_ABDUCT_HOMING_TABLE = FINGER_HOMING_TABLE[3:5]
 MIDDLE_FINGER_ABDUCT_HOMING_TABLE = FINGER_HOMING_TABLE[5:6]
 RING_FINGER_HOMING_TABLE = FINGER_HOMING_TABLE[6:9]
 MIDDLE_MCP_FLEX_MOTOR_ID = 8
+MIDDLE_MCP_ABDUCT_MOTOR_ID = 9
 MIDDLE_MCP_FLEX_PRE_ABDUCT_POSITION_RAD = -0.5 * np.pi
 
 HomingEntry = Tuple[int, str, float, int]
@@ -275,7 +276,14 @@ def _home_finger_sequence(
     )
     homed_motor_indices.extend(new_indices)
 
-    return _finish_homing(hand, offsets, homed_motor_indices, label, save)
+    return _finish_homing(
+        hand,
+        offsets,
+        homed_motor_indices,
+        label,
+        save,
+        pre_zero_motor_id=MIDDLE_MCP_ABDUCT_MOTOR_ID,
+    )
 
 
 def _home_table(
@@ -343,6 +351,7 @@ def _finish_homing(
     homed_motor_indices: Sequence[int],
     label: str,
     save: bool,
+    pre_zero_motor_id: Optional[int] = None,
 ) -> HandConfig:
     new_config = dataclasses.replace(hand.config, home_offsets=tuple(offsets))
     hand.config = new_config
@@ -350,6 +359,13 @@ def _finish_homing(
     if not homed_motor_indices:
         print(f"No {label} motors were homed.")
         return new_config
+
+    if pre_zero_motor_id is not None:
+        _move_homed_motor_to_zero_first(
+            hand,
+            pre_zero_motor_id,
+            homed_motor_indices,
+        )
 
     _move_homed_motors_to_zero(hand, homed_motor_indices)
 
@@ -360,6 +376,31 @@ def _finish_homing(
     time.sleep(2.0)
 
     return new_config
+
+
+def _move_homed_motor_to_zero_first(
+    hand: MidasHand,
+    motor_id: int,
+    homed_motor_indices: Sequence[int],
+) -> None:
+    if motor_id not in hand.motor_ids:
+        return
+
+    motor_idx = hand.motor_ids.index(motor_id)
+    if motor_idx not in homed_motor_indices:
+        return
+
+    print(f"Moving motor {motor_id} to software zero before group zero move...")
+    _set_single_motor_position_and_wait(
+        hand,
+        motor_idx,
+        0.0,
+        home_offsets=hand.config.home_offsets,
+        tolerance_rad=0.035,
+        velocity_threshold_rad_s=0.05,
+        timeout_s=8.0,
+        poll_interval_s=0.01,
+    )
 
 
 def _set_middle_mcp_flex_for_abduction(
@@ -375,11 +416,11 @@ def _set_middle_mcp_flex_for_abduction(
 
     motor_idx = hand.motor_ids.index(MIDDLE_MCP_FLEX_MOTOR_ID)
     print("Moving Middle MCP flex to -90 deg before Middle MCP abduct homing...")
-    _set_single_motor_position_blocking(
+    _set_single_motor_position_and_wait(
         hand,
         motor_idx,
         MIDDLE_MCP_FLEX_PRE_ABDUCT_POSITION_RAD,
-        home_offset_rad=home_offsets[motor_idx],
+        home_offsets=home_offsets,
         tolerance_rad=0.035,
         velocity_threshold_rad_s=0.05,
         timeout_s=8.0,
@@ -387,52 +428,52 @@ def _set_middle_mcp_flex_for_abduction(
     )
 
 
-def _set_single_motor_position_blocking(
+def _set_single_motor_position_and_wait(
     hand: MidasHand,
     motor_idx: int,
     target_rad: float,
-    home_offset_rad: float,
+    home_offsets: Sequence[float],
     tolerance_rad: float,
     velocity_threshold_rad_s: float,
     timeout_s: float,
     poll_interval_s: float,
 ) -> None:
     motor_id = hand.motor_ids[motor_idx]
-    raw_target = (
-        target_rad * hand.config.joint_signs_array[motor_idx]
-    ) + home_offset_rad
-    hand.set_motion_profile(
-        profile_velocity_rad_s=0.3,
-        profile_acceleration_raw=20,
-        motor_ids=[motor_id],
-    )
-    hand._client().write_desired_pos([motor_id], [raw_target])
+    previous_config = hand.config
+    hand.config = dataclasses.replace(hand.config, home_offsets=tuple(home_offsets))
 
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        raw_pos = hand._client().read_pos()[motor_idx]
-        pos = (raw_pos - home_offset_rad) * hand.config.joint_signs_array[motor_idx]
-        vel = hand._read_motor_vel()[motor_idx]
-        if (
-            abs(pos - target_rad) <= tolerance_rad
-            and abs(vel) <= velocity_threshold_rad_s
-        ):
+    try:
+        target = hand._read_motor_pos()
+        target[motor_idx] = target_rad
+        hand.set_motion_profile(
+            profile_velocity_rad_s=0.5,
+            profile_acceleration_raw=200,
+            motor_ids=[motor_id],
+        )
+        hand.set_positions(target, clip=False)
+
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            pos = hand._read_motor_pos()[motor_idx]
+            vel = hand._read_motor_vel()[motor_idx]
+            if (
+                abs(pos - target_rad) <= tolerance_rad
+                and abs(vel) <= velocity_threshold_rad_s
+            ):
+                return
+            time.sleep(poll_interval_s)
+        raise TimeoutError(
+            f"Motor {motor_id} did not reach {target_rad:.3f} rad within {timeout_s:.2f}s"
+        )
+    finally:
+        try:
             hand.set_motion_profile(
                 profile_velocity_rad_s=None,
                 profile_acceleration_raw=0,
                 motor_ids=[motor_id],
             )
-            return
-        time.sleep(poll_interval_s)
-
-    hand.set_motion_profile(
-        profile_velocity_rad_s=None,
-        profile_acceleration_raw=0,
-        motor_ids=[motor_id],
-    )
-    raise TimeoutError(
-        f"Motor {motor_id} did not reach {target_rad:.3f} rad within {timeout_s:.2f}s"
-    )
+        finally:
+            hand.config = previous_config
 
 
 def _move_homed_motors_to_zero(
@@ -443,12 +484,17 @@ def _move_homed_motors_to_zero(
     print("Moving homed motors to software zero...")
     target = hand._read_motor_pos()
     target[homed_motor_indices] = 0.0
-    hand.set_motion_profile(profile_velocity_rad_s=0.3, profile_acceleration_raw=20)
-    hand.set_positions_blocking(
-        target,
-        tolerance_rad=0.035,
-        velocity_threshold_rad_s=0.05,
-        timeout_s=12.0,
-        poll_interval_s=0.01,
-    )
-    hand.set_motion_profile(profile_velocity_rad_s=None, profile_acceleration_raw=0)
+    hand.set_motion_profile(profile_velocity_rad_s=0.5, profile_acceleration_raw=200)
+    try:
+        hand.set_positions(target, clip=False)
+        reached = hand.wait_until_reached(
+            target,
+            tolerance_rad=0.05,
+            velocity_threshold_rad_s=0.05,
+            timeout_s=12.0,
+            poll_interval_s=0.01,
+        )
+        if not reached:
+            raise TimeoutError("Homed motors did not reach software zero within 12.00s")
+    finally:
+        hand.set_motion_profile(profile_velocity_rad_s=None, profile_acceleration_raw=0)

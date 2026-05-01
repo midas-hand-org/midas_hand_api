@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from typing import Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -33,17 +34,23 @@ class MidasHand:
             self.connect()
 
     def connect(self) -> None:
-        """Connect to the configured port, or try likely ports if none was given."""
+        """Connect to the configured port, or auto-select a responding bus."""
 
         ports = [self.port] if self.port else discover_ports()
         if not ports:
             ports = ["/dev/ttyUSB0"]
 
         last_error: Optional[Exception] = None
+        checked_ports = []
         for port in ports:
             if port is None:
                 continue
             try:
+                if self.port is None and not _port_has_responders(
+                    port, self.config.baudrate, self.motor_ids
+                ):
+                    checked_ports.append(port)
+                    continue
                 client = DynamixelClient(
                     self.motor_ids,
                     port=port,
@@ -55,9 +62,15 @@ class MidasHand:
                 client.connect()
                 self.dxl_client = client
                 self.port = port
+                self.config = replace(self.config, port=port)
                 return
             except Exception as exc:
                 last_error = exc
+        if self.config.port is None and last_error is None:
+            raise OSError(
+                "No configured motor IDs responded on candidate ports "
+                f"{checked_ports}"
+            )
         raise OSError(f"Could not connect to Midas hand. Last error: {last_error}")
 
     @property
@@ -216,7 +229,7 @@ class MidasHand:
         return False
 
     def set_normalized(self, values: Sequence[float]) -> None:
-        """Command joints from normalized ``[-1, 1]`` values."""
+        """Command motor positions from normalized ``[-1, 1]`` values."""
 
         if len(values) != len(self.motor_ids):
             raise ValueError(f"Expected {len(self.motor_ids)} normalized values")
@@ -229,34 +242,42 @@ class MidasHand:
         self.set_positions(positions, clip=True)
 
     def read_pos(self) -> np.ndarray:
-        """Return joint positions in radians for all 16 DOF.
+        """Return calibrated motor positions in radians for active actuators."""
 
-        Active joints are read from hardware; passive DIP joints are estimated
-        via the placeholder coupling in :mod:`midas_hand_api.kinematics`.
-        """
-        return self._expand_positions(self._read_motor_pos())
+        return self._read_motor_pos()
 
     def read_vel(self) -> np.ndarray:
-        """Return joint velocities in rad/s for all 16 DOF.
+        """Return calibrated motor velocities in rad/s for active actuators."""
 
-        Passive DIP velocities are estimated from the PIP velocity via the
-        placeholder coupling in :mod:`midas_hand_api.kinematics`.
-        """
-        return self._expand_velocities(self._read_motor_vel())
+        return self._read_motor_vel()
 
     def read_cur(self) -> np.ndarray:
         """Return motor currents in mA for the 13 active motors."""
         return self._client().read_cur()
 
     def read_pos_vel(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Return (positions, velocities) each expanded to 16 DOF."""
-        motor_pos, motor_vel = self._read_motor_pos_vel()
-        return self._expand_positions(motor_pos), self._expand_velocities(motor_vel)
+        """Return calibrated motor positions and velocities."""
+        return self._read_motor_pos_vel()
 
     def read_pos_vel_cur(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Return (positions 16-DOF, velocities 16-DOF, currents 13-motor)."""
-        motor_pos, motor_vel, cur = self._read_motor_pos_vel_cur()
-        return self._expand_positions(motor_pos), self._expand_velocities(motor_vel), cur
+        """Return calibrated motor positions, velocities, and currents."""
+        return self._read_motor_pos_vel_cur()
+
+    def read_joint_pos(self) -> np.ndarray:
+        """Return expanded joint positions in radians for all 16 DOF.
+
+        Active joints are read from hardware; passive DIP joints are estimated
+        via the placeholder coupling in :mod:`midas_hand_api.kinematics`.
+        """
+        return self._expand_positions(self._read_motor_pos())
+
+    def read_joint_vel(self) -> np.ndarray:
+        """Return expanded joint velocities in rad/s for all 16 DOF.
+
+        Passive DIP velocities are estimated from the PIP velocity via the
+        placeholder coupling in :mod:`midas_hand_api.kinematics`.
+        """
+        return self._expand_velocities(self._read_motor_vel())
 
     def read_tactile(self) -> TactileFrame:
         """Return one tactile frame from the configured tactile sensor."""
@@ -360,8 +381,8 @@ class MidasHand:
 
         Example — different P gain for thumb vs fingers::
 
-            hand.set_gains([1, 2, 3, 4], p=600)        # thumb
-            hand.set_gains([5, 6, 7, 8, 9, 10, 11, 12, 13], p=900)  # fingers
+            hand.set_gains([0, 1, 2, 3], p=600)        # thumb
+            hand.set_gains([4, 5, 6, 7, 8, 9, 10, 11, 12], p=900)  # fingers
         """
         ids = list(motor_ids) if motor_ids is not None else self.motor_ids
         client = self._client()
@@ -462,3 +483,22 @@ def scale(value, lower, upper):
     """Map ``[-1, 1]`` to ``[lower, upper]``."""
 
     return 0.5 * (np.asarray(value, dtype=np.float64) + 1.0) * (upper - lower) + lower
+
+
+def _port_has_responders(port: str, baudrate: int, motor_ids: Sequence[int]) -> bool:
+    import dynamixel_sdk
+
+    port_handler = dynamixel_sdk.PortHandler(port)
+    packet_handler = dynamixel_sdk.PacketHandler(ct.PROTOCOL_VERSION)
+    if not port_handler.openPort():
+        return False
+    try:
+        if not port_handler.setBaudRate(int(baudrate)):
+            return False
+        for motor_id in motor_ids:
+            _, comm_result, _ = packet_handler.ping(port_handler, int(motor_id))
+            if comm_result == dynamixel_sdk.COMM_SUCCESS:
+                return True
+        return False
+    finally:
+        port_handler.closePort()

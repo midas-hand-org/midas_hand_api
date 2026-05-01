@@ -70,6 +70,19 @@ def _motor_value_map(
     return {int(motor_id): float(value) for motor_id, value in zip(motor_ids, values)}
 
 
+def _lookup_motor_value(
+    values: Mapping[Union[int, str], float],
+    motor_id: int,
+    name: str,
+) -> float:
+    if motor_id in values:
+        return float(values[motor_id])
+    key = str(motor_id)
+    if key in values:
+        return float(values[key])
+    raise ValueError(f"{name} is missing value for motor ID {motor_id}")
+
+
 def _filtered_passive_topology(
     source_n_motors: int,
     source_passive_joint_indices: Sequence[int],
@@ -126,8 +139,8 @@ class HandConfig:
 
     position_p_gain: int = 900
     position_i_gain: int = 0
-    position_d_gain: int = 0
-    goal_current_limit: int = 500
+    position_d_gain: int = 600
+    goal_current_limit: int = 600
     max_goal_current_limit: int = ct.XM335_T323_MAX_CURRENT_LIMIT
     operating_mode: int = ct.OPERATING_MODE_CURRENT_BASED_POSITION
 
@@ -248,8 +261,8 @@ class HandConfig:
             "baudrate": baudrate,
             "position_p_gain": 900,
             "position_i_gain": 0,
-            "position_d_gain": 0,
-            "goal_current_limit": 500,
+            "position_d_gain": 600,
+            "goal_current_limit": 600,
             "max_goal_current_limit": ct.XM335_T323_MAX_CURRENT_LIMIT,
             "operating_mode": ct.OPERATING_MODE_CURRENT_BASED_POSITION,
             "counts_per_rev": 4096,
@@ -299,31 +312,16 @@ class HandConfig:
         )
 
     def save(self, path: Union[str, pathlib.Path] = DEFAULT_CONFIG_PATH) -> None:
-        """Save this configuration to a YAML file (default: ``~/.midas_hand/config.yaml``).
+        """Save hand calibration to YAML (default: ``~/.midas_hand/config.yaml``).
 
-        Includes all calibration data (home_offsets, joint_signs, limits) so a
-        single save after the initial calibration run is enough for future sessions.
-        The directory is created automatically if it does not exist.
+        The YAML intentionally stores only hand-specific calibration values.
+        Controller gains, current limits, model constants, and baudrate live in
+        code defaults and can be overridden explicitly at runtime.
         """
         path = pathlib.Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         data = {
             "motor_ids": list(self.motor_ids),
-            "motor_model": self.motor_model,
-            "expected_model_number": self.expected_model_number,
-            "port": self.port,
-            "baudrate": self.baudrate,
-            "passive_joint_indices": list(self.passive_joint_indices),
-            "pip_motor_indices": list(self.pip_motor_indices),
-            "position_p_gain": self.position_p_gain,
-            "position_i_gain": self.position_i_gain,
-            "position_d_gain": self.position_d_gain,
-            "goal_current_limit": self.goal_current_limit,
-            "max_goal_current_limit": self.max_goal_current_limit,
-            "operating_mode": self.operating_mode,
-            "counts_per_rev": self.counts_per_rev,
-            "velocity_unit_rpm": float(self.velocity_unit_rpm),
-            "current_unit_ma": float(self.current_unit_ma),
             "home_offsets": _motor_value_map(self.motor_ids, self.home_offsets),
             "joint_signs": _motor_value_map(self.motor_ids, self.joint_signs),
             "joint_lower_limits": _motor_value_map(
@@ -341,11 +339,11 @@ class HandConfig:
         motor_indices: Sequence[int],
         path: Union[str, pathlib.Path] = DEFAULT_CONFIG_PATH,
     ) -> None:
-        """Merge selected home offsets into an existing YAML config.
+        """Merge selected home offsets into the saved calibration YAML.
 
         Homing may be run on only part of the hand. This method preserves
-        existing calibration entries for other motors and updates/replaces only
-        the successfully homed motor IDs.
+        existing calibration entries for other motors, updates/replaces only
+        the successfully homed motor IDs, and drops stale runtime tuning fields.
         """
 
         path = pathlib.Path(path)
@@ -355,12 +353,13 @@ class HandConfig:
         else:
             data = {}
 
-        data.setdefault("motor_ids", list(self.motor_ids))
-        existing_ids = [int(motor_id) for motor_id in data.get("motor_ids", [])]
+        saved_motor_ids = [int(motor_id) for motor_id in data.get("motor_ids", [])]
+        existing_ids = list(saved_motor_ids)
         for motor_id in self.motor_ids:
             if int(motor_id) not in existing_ids:
                 existing_ids.append(int(motor_id))
-        data["motor_ids"] = existing_ids
+
+        merged_data = {"motor_ids": existing_ids}
 
         for key in _MOTOR_VALUE_FIELDS:
             values = getattr(self, key)
@@ -368,7 +367,7 @@ class HandConfig:
             if isinstance(existing, list):
                 existing = {
                     int(motor_id): float(value)
-                    for motor_id, value in zip(data["motor_ids"], existing)
+                    for motor_id, value in zip(saved_motor_ids, existing)
                 }
             else:
                 existing = {
@@ -383,45 +382,35 @@ class HandConfig:
             else:
                 for index, motor_id in enumerate(self.motor_ids):
                     existing.setdefault(int(motor_id), float(values[index]))
-            data[key] = existing
-
-        for key, value in {
-            "motor_model": self.motor_model,
-            "expected_model_number": self.expected_model_number,
-            "port": self.port,
-            "baudrate": self.baudrate,
-            "passive_joint_indices": list(self.passive_joint_indices),
-            "pip_motor_indices": list(self.pip_motor_indices),
-            "position_p_gain": self.position_p_gain,
-            "position_i_gain": self.position_i_gain,
-            "position_d_gain": self.position_d_gain,
-            "goal_current_limit": self.goal_current_limit,
-            "max_goal_current_limit": self.max_goal_current_limit,
-            "operating_mode": self.operating_mode,
-            "counts_per_rev": self.counts_per_rev,
-            "velocity_unit_rpm": float(self.velocity_unit_rpm),
-            "current_unit_ma": float(self.current_unit_ma),
-        }.items():
-            data.setdefault(key, value)
+            merged_data[key] = existing
 
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
-            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+            yaml.dump(merged_data, f, default_flow_style=False, sort_keys=False)
 
     @classmethod
     def load(cls, path: Union[str, pathlib.Path] = DEFAULT_CONFIG_PATH) -> "HandConfig":
-        """Load a configuration from a YAML file (default: ``~/.midas_hand/config.yaml``)."""
+        """Load calibration from YAML over the code defaults.
+
+        Runtime fields that may exist in older YAML files, such as gains,
+        current limits, port, baudrate, and model constants, are ignored.
+        """
         with open(path) as f:
-            data = yaml.safe_load(f)
-        for key in ("motor_ids", "passive_joint_indices", "pip_motor_indices"):
-            if key in data and isinstance(data[key], list):
-                data[key] = tuple(data[key])
-        motor_ids = data.get("motor_ids", DEFAULT_MOTOR_IDS)
+            data = yaml.safe_load(f) or {}
+        motor_ids = tuple(
+            int(motor_id) for motor_id in data.get("motor_ids", DEFAULT_MOTOR_IDS)
+        )
+        config = cls.xm335_t323(motor_ids=motor_ids)
+        updates = {}
         for key in _MOTOR_VALUE_FIELDS:
             if key in data:
                 val = data[key]
                 if isinstance(val, dict):
-                    data[key] = tuple(float(val[mid]) for mid in motor_ids)
+                    updates[key] = tuple(
+                        _lookup_motor_value(val, int(mid), key) for mid in motor_ids
+                    )
                 elif isinstance(val, list):
-                    data[key] = tuple(val)
-        return cls(**data)
+                    updates[key] = tuple(float(value) for value in val)
+        if updates:
+            config = replace(config, **updates)
+        return config

@@ -94,20 +94,29 @@ def _disable_unselected_motors(config: HandConfig, selected_ids: set[int]) -> No
         disable_hand.disable_torque()
 
 
+def _has_nonzero_home_offsets(config: HandConfig) -> bool:
+    return any(abs(offset) > 1e-9 for offset in config.home_offsets)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="midas-hand")
     parser.add_argument("--port", default=None, help="Serial port, e.g. /dev/ttyUSB0")
-    parser.add_argument("--baudrate", type=int, default=1_000_000)
+    parser.add_argument("--baudrate", type=int, default=None)
     parser.add_argument(
         "--motors",
-        default="0,1,2,3,4,5,6,7,8,9,10,11,12",
-        help="Comma-separated motor IDs",
+        default=None,
+        help="Comma-separated motor IDs. Defaults to 0-12.",
     )
     parser.add_argument("--configure", action="store_true", help="Apply PID/current settings")
     parser.add_argument(
         "--raw",
         action="store_true",
         help="Print unhomed motor positions in radians",
+    )
+    parser.add_argument(
+        "--joints",
+        action="store_true",
+        help="Print expanded joint positions, including passive DIP joints",
     )
     parser.add_argument("--home", action="store_true", help="Run full hand homing sequence and save config")
     parser.add_argument("--home-thumb", action="store_true", help="Run thumb homing sequence and save config")
@@ -134,46 +143,98 @@ def main() -> None:
         help="Print per-ID scan errors",
     )
     args = parser.parse_args()
+    default_baudrate = args.baudrate if args.baudrate is not None else 1_000_000
 
     if args.scan:
         scan_ids = _parse_id_spec(args.scan_range)
-        ports = discover_ports()
-        port = args.port or (ports[0] if ports else "/dev/ttyUSB0")
+        ports = [args.port] if args.port else discover_ports()
+        if not ports:
+            ports = ["/dev/ttyUSB0"]
         baudrates = (
             [int(item) for item in args.scan_baudrates.split(",") if item]
             if args.scan_baudrates
-            else [args.baudrate]
+            else [default_baudrate]
         )
-        for baudrate in baudrates:
-            ping_result = _scan_raw(
-                port=port,
-                baudrate=baudrate,
-                motor_ids=scan_ids,
-                verbose=args.scan_verbose,
-            )
-            print(f"Scan baudrate {baudrate} on {port}:")
-            print(f"  Responding : {sorted(ping_result.keys())}")
-            if ping_result:
-                print(f"  Models     : {ping_result}")
+        for port in ports:
+            for baudrate in baudrates:
+                try:
+                    ping_result = _scan_raw(
+                        port=port,
+                        baudrate=baudrate,
+                        motor_ids=scan_ids,
+                        verbose=args.scan_verbose,
+                    )
+                except OSError as exc:
+                    print(f"Scan baudrate {baudrate} on {port}: {exc}")
+                    continue
+                print(f"Scan baudrate {baudrate} on {port}:")
+                print(f"  Responding : {sorted(ping_result.keys())}")
+                if ping_result:
+                    print(f"  Models     : {ping_result}")
         return
+
+    homing_requested = args.home or args.home_thumb or args.home_fingers
+    requested_motor_ids = (
+        tuple(_parse_id_spec(args.motors)) if args.motors else DEFAULT_MOTOR_IDS
+    )
+    config_source = None
 
     if args.config:
         config = HandConfig.load(args.config)
+        config_source = args.config
+        if args.motors:
+            config = config.subset(requested_motor_ids)
+        config_updates = {}
+        if args.port:
+            config_updates["port"] = args.port
+        if args.baudrate is not None:
+            config_updates["baudrate"] = args.baudrate
+        if config_updates:
+            config = dataclasses.replace(config, **config_updates)
+    elif homing_requested:
+        config = HandConfig.xm335_t323(
+            motor_ids=requested_motor_ids, port=args.port, baudrate=default_baudrate
+        )
     elif DEFAULT_CONFIG_PATH.exists():
         config = HandConfig.load(DEFAULT_CONFIG_PATH)
-        if args.port:
-            config = dataclasses.replace(config, port=args.port)
+        config_source = str(DEFAULT_CONFIG_PATH)
+        if args.motors:
+            config = config.subset(requested_motor_ids)
+        # The saved config owns calibration, not the live USB enumeration. Unless
+        # the user explicitly pins --port, re-probe and pick the responding bus.
+        config_updates = {"port": args.port}
+        if args.baudrate is not None:
+            config_updates["baudrate"] = args.baudrate
+        config = dataclasses.replace(config, **config_updates)
     else:
-        motor_ids = tuple(int(item) for item in args.motors.split(",") if item)
         config = HandConfig.xm335_t323(
-            motor_ids=motor_ids, port=args.port, baudrate=args.baudrate
+            motor_ids=requested_motor_ids, port=args.port, baudrate=default_baudrate
         )
 
+    if config_source:
+        suffix = " (raw reads bypass home_offsets)" if args.raw else ""
+        print(f"Loaded config: {config_source}{suffix}")
+    elif not homing_requested:
+        print(
+            f"No saved config at {DEFAULT_CONFIG_PATH}; "
+            "using default zero home_offsets."
+        )
+
+    if not args.raw and not homing_requested and not _has_nonzero_home_offsets(config):
+        print("home_offsets are all zero; calibrated positions will match --raw.")
+
     # Discovery: ping all configured motors, suppress SDK packet-level noise
-    logging.disable(logging.ERROR)
-    with MidasHand(config) as hand:
-        ping_result = hand.ping()
-    logging.disable(logging.NOTSET)
+    try:
+        logging.disable(logging.ERROR)
+        with MidasHand(config) as hand:
+            ping_result = hand.ping()
+            config = hand.config
+    except OSError as exc:
+        logging.disable(logging.NOTSET)
+        print(f"Could not connect to the Dynamixel bus: {exc}")
+        return
+    finally:
+        logging.disable(logging.NOTSET)
 
     all_ids = sorted(config.motor_ids)
     responding_ids = sorted(ping_result.keys())
@@ -220,9 +281,11 @@ def main() -> None:
         try:
             while True:
                 if args.raw:
-                    print(f"Position (raw): {hand._client().read_pos()}")
+                    print(f"Motor position (raw, 13): {hand._client().read_pos()}")
+                elif args.joints:
+                    print(f"Joint position (16): {hand.read_joint_pos()}")
                 else:
-                    print(f"Position: {hand.read_pos()}")
+                    print(f"Motor position (13): {hand.read_pos()}")
                 time.sleep(0.03)
         except KeyboardInterrupt:
             pass

@@ -130,8 +130,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("Interrupted; disabling torque.")
     finally:
-        hand.disable_torque()
-        hand.close(disable_torque=False)
+        print("Disabling torque. Please wait...")
+        hand.shutdown()
 
 
 if __name__ == "__main__":

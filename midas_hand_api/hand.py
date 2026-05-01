@@ -361,10 +361,15 @@ class MidasHand:
         ids = list(motor_ids) if motor_ids is not None else self.motor_ids
         self._client().set_torque_enabled(ids, True)
 
-    def disable_torque(self, motor_ids: Optional[Sequence[int]] = None) -> None:
-        """Disable torque for the specified motors (defaults to all)."""
+    def disable_torque(
+        self,
+        motor_ids: Optional[Sequence[int]] = None,
+        retries: int = 3,
+        verify: bool = True,
+    ) -> None:
+        """Disable torque for the specified motors, retrying and verifying by default."""
         ids = list(motor_ids) if motor_ids is not None else self.motor_ids
-        self._client().set_torque_enabled(ids, False)
+        self._client().set_torque_enabled(ids, False, retries=retries, verify=verify)
 
     def set_gains(
         self,
@@ -464,6 +469,37 @@ class MidasHand:
             self.dxl_client.disconnect(disable_torque=disable_torque)
         if self.tactile_sensor:
             self.tactile_sensor.close()
+
+    def shutdown(
+        self,
+        attempts: int = 10,
+        torque_retries: int = 10,
+        retry_interval_s: float = 0.2,
+    ) -> None:
+        """Disable torque robustly and close the hand connection.
+
+        This is intended for script shutdown paths. It catches repeated
+        ``KeyboardInterrupt`` during torque-disable attempts so Ctrl-C spam is
+        less likely to leave one motor torqued on.
+        """
+
+        torque_disabled = False
+        for attempt in range(1, attempts + 1):
+            try:
+                self.disable_torque(retries=torque_retries, verify=True)
+                torque_disabled = True
+                break
+            except KeyboardInterrupt:
+                print("Interrupt received during shutdown; still disabling torque...")
+            except OSError as exc:
+                print(f"Torque disable attempt {attempt} failed: {exc}")
+                time.sleep(retry_interval_s)
+
+        try:
+            self.close(disable_torque=not torque_disabled)
+        except KeyboardInterrupt:
+            print("Interrupt received while closing port; retrying close...")
+            self.close(disable_torque=not torque_disabled)
 
     def _client(self) -> DynamixelClient:
         if not self.dxl_client:

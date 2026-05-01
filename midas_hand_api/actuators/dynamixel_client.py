@@ -128,7 +128,7 @@ class DynamixelClient:
             return
         if disable_torque:
             try:
-                self.set_torque_enabled(self.motor_ids, False, retries=0)
+                self.set_torque_enabled(self.motor_ids, False, retries=3, verify=True)
             except OSError:
                 logging.warning("Could not disable torque during disconnect; closing port anyway")
         self.port_handler.closePort()
@@ -198,10 +198,20 @@ class DynamixelClient:
         enabled: bool,
         retries: int = 1,
         retry_interval: float = 0.1,
+        verify: bool = False,
     ) -> None:
         remaining = list(motor_ids)
         while remaining:
             remaining = self.write_byte(remaining, int(enabled), ct.ADDR_TORQUE_ENABLE)
+            if verify:
+                time.sleep(retry_interval)
+                states = self.read_byte_data(remaining, ct.ADDR_TORQUE_ENABLE)
+                expected = int(enabled)
+                remaining = [
+                    int(motor_id)
+                    for motor_id in remaining
+                    if states.get(int(motor_id)) != expected
+                ]
             if not remaining or retries == 0:
                 break
             time.sleep(retry_interval)

@@ -26,3 +26,9 @@ midas-hand = "midas_hand_api.__main__:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["midas_hand_api*"]
+
+[tool.setuptools.package-data]
+midas_hand_api = ["assets/*.csv"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

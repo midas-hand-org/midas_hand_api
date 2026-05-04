@@ -267,17 +267,18 @@ class MidasHand:
         """Return expanded joint positions in radians for all 16 DOF.
 
         Active joints are read from hardware; passive DIP joints are estimated
-        via the placeholder coupling in :mod:`midas_hand_api.kinematics`.
+        via the four-bar lookup in :mod:`midas_hand_api.kinematics`.
         """
         return self._expand_positions(self._read_motor_pos())
 
     def read_joint_vel(self) -> np.ndarray:
         """Return expanded joint velocities in rad/s for all 16 DOF.
 
-        Passive DIP velocities are estimated from the PIP velocity via the
-        placeholder coupling in :mod:`midas_hand_api.kinematics`.
+        Passive DIP velocities use the current PIP position because the
+        four-bar coupling is nonlinear.
         """
-        return self._expand_velocities(self._read_motor_vel())
+        motor_pos, motor_vel = self._read_motor_pos_vel()
+        return self._expand_velocities(motor_vel, motor_pos)
 
     def read_tactile(self) -> TactileFrame:
         """Return one tactile frame from the configured tactile sensor."""
@@ -330,7 +331,11 @@ class MidasHand:
                 motor_idx += 1
         return result
 
-    def _expand_velocities(self, motor_vel: np.ndarray) -> np.ndarray:
+    def _expand_velocities(
+        self,
+        motor_vel: np.ndarray,
+        motor_pos: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
         """Expand 13-motor velocities to 16-DOF joint space.
 
         Passive DIP velocities are estimated via
@@ -341,8 +346,11 @@ class MidasHand:
         motor_idx = 0
         for dof_idx in range(self.config.n_dof):
             if dof_idx in passive_map:
+                pip_motor_idx = passive_map[dof_idx]
+                pip_rad = 0.0 if motor_pos is None else motor_pos[pip_motor_idx]
                 result[dof_idx] = kinematics.pip_to_dip_velocity(
-                    motor_vel[passive_map[dof_idx]]
+                    motor_vel[pip_motor_idx],
+                    pip_rad=pip_rad,
                 )
             else:
                 result[dof_idx] = motor_vel[motor_idx]

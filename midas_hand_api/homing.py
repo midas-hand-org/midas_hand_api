@@ -19,8 +19,8 @@ from .hand import MidasHand
 THUMB_HOMING_TABLE = [
     (0, "Thumb IP", 1.61221381, -1),
     (1, "Thumb MCP", 1.4450099, -1),
-    (2, "Thumb CMC flex", -0.88510692, +1),
-    (3, "Thumb CMC abduct", 0.0, -1),
+    (2, "Thumb CMC side", -0.88510692, +1),
+    (3, "Thumb CMC roll", 0.0, 1),
 ]
 
 FINGER_HOMING_TABLE = [

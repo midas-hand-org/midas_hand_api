@@ -26,13 +26,13 @@ THUMB_HOMING_TABLE = [
 FINGER_HOMING_TABLE = [
     (4, "Index PIP", 0.0, +1),
     (5, "Index MCP flex", -0.05, +1),
-    (6, "Index MCP abduct", 0.8, -1),
+    (6, "Index MCP abduct", 0.81, -1),
     (7, "Middle PIP", 0.0, +1),
     (8, "Middle MCP flex", -0.05, +1),
-    (9, "Middle MCP abduct", 0.8, -1),
+    (9, "Middle MCP abduct", 0.81, -1),
     (10, "Ring PIP", 0.0, +1),
     (11, "Ring MCP flex", -0.05, +1),
-    (12, "Ring MCP abduct", -0.8, +1),
+    (12, "Ring MCP abduct", -0.81, +1),
 ]
 
 INDEX_FINGER_HOMING_TABLE = FINGER_HOMING_TABLE[0:3]

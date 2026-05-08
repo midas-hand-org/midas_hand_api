@@ -137,9 +137,9 @@ class HandConfig:
     passive_joint_indices: Tuple[int, ...] = DEFAULT_PASSIVE_JOINT_INDICES
     pip_motor_indices: Tuple[int, ...] = DEFAULT_PIP_MOTOR_INDICES
 
-    position_p_gain: int = 900
+    position_p_gain: int = 500
     position_i_gain: int = 0
-    position_d_gain: int = 600
+    position_d_gain: int = 250
     goal_current_limit: int = 600
     max_goal_current_limit: int = ct.XM335_T323_MAX_CURRENT_LIMIT
     operating_mode: int = ct.OPERATING_MODE_CURRENT_BASED_POSITION

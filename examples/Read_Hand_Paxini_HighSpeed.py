@@ -1,4 +1,4 @@
-"""Read thumb and index Paxini force vectors through the high-speed board.
+"""Read hand Paxini force vectors through the high-speed board.
 
 By default this script uses the high-speed board's auto-push stream:
 
@@ -7,8 +7,10 @@ By default this script uses the high-speed board's auto-push stream:
 
     Stream frame:
         AA 56 <reserved> <valid_frame_len:2> <status>
-        <6-byte thumb metadata> <thumb force bytes>
-        <6-byte index metadata> <index force bytes> <lrc>
+        <6-byte thumb resultant> <thumb force bytes>
+        <6-byte index resultant> <index force bytes>
+        <6-byte middle resultant> <middle force bytes>
+        <6-byte ring resultant> <ring force bytes> <lrc>
 
 The high-speed board request/response format is available with
 ``--mode request``:
@@ -31,7 +33,8 @@ USB/UART adapter, not the high-speed board:
         <returned_len:2> <status> <returned_data> <lrc>
 
 The device address is module number + 1. Defaults here match the current hand:
-thumb module 0 -> device address 1, index module 1 -> device address 2.
+thumb module 0 -> device address 1, index module 1 -> device address 2,
+middle module 2 -> device address 3, ring module 3 -> device address 4.
 
 Run:
     python examples/Read_Hand_Paxini_HighSpeed.py --port /dev/ttyUSB0
@@ -47,12 +50,14 @@ subtraction for plotting.
 from __future__ import annotations
 
 import argparse
+import csv
 import logging
 import math
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -76,6 +81,7 @@ READ_VERSION_FRAME = bytes.fromhex("55AA000300000F00EF")
 ADDR_CALIBRATION = 0x0003
 ADDR_DISTRIBUTED_FORCE = 0x040E
 FORCE_SCALE_N = 0.1
+ASSET_DIR = Path(__file__).resolve().parents[1] / "midas_hand_api" / "assets"
 
 BOARD_DISTRIBUTED_FORCE_ADDRESSES = {
     "thumb": 0x1000,
@@ -86,8 +92,10 @@ BOARD_DISTRIBUTED_FORCE_ADDRESSES = {
     "palm": 0x3800,
 }
 BOARD_SENSOR_COMBINATION_ADDRESS = 0x0010
+BOARD_AUTO_POST_BACK_DATA_TYPE_ADDRESS = 0x0016
 BOARD_FORCE_POINT_COUNT_ADDRESS = 0x0030
 BOARD_FORCE_POINT_COUNT_LENGTH = 0x38
+AUTO_PUSH_DATA_TYPE_RESULTANT_AND_DISTRIBUTED = 0x03
 BOARD_DIGIT_MODULE_START = {
     "thumb": 0,
     "index": 4,
@@ -107,11 +115,20 @@ BOARD_DIGIT_MODULE_STRIDE = {
 
 THUMB_DEVICE_ADDRESS = 1
 INDEX_DEVICE_ADDRESS = 2
+MIDDLE_DEVICE_ADDRESS = 3
+RING_DEVICE_ADDRESS = 4
 THUMB_FORCE_POINTS = 127
-INDEX_FORCE_POINTS = 52
+FINGER_FORCE_POINTS = 52
+INDEX_FORCE_POINTS = FINGER_FORCE_POINTS
+MIDDLE_FORCE_POINTS = FINGER_FORCE_POINTS
+RING_FORCE_POINTS = FINGER_FORCE_POINTS
+THUMB_COORDS_PATH = ASSET_DIR / "paxini_fingertip_26mm_127pts.csv"
+FINGER_COORDS_PATH = ASSET_DIR / "paxini_fingertip_15mm_52pts.csv"
 
 DEFAULT_READ_INTERVAL_S = 0.03
 DEFAULT_UPDATE_MS = 100
+DEFAULT_PUBLISH_RATE_HZ = 60.0
+DEFAULT_SERIAL_SETTLE_S = 0.75
 DEFAULT_MAX_RESPONSE_BODY_LENGTH = 4096
 DEFAULT_READ_CHUNK_SIZE = 32
 DEFAULT_CALIBRATION_SAMPLES = 20
@@ -144,6 +161,7 @@ class DigitConfig:
     name: str
     device_address: int
     force_points: int
+    coordinate_path: Optional[Path] = None
 
 
 @dataclass(frozen=True)
@@ -210,8 +228,77 @@ def format_bytes(data: bytes, max_bytes: int = 80) -> str:
     )
 
 
+def drain_serial_input(
+    ser: serial.Serial,
+    *,
+    quiet_s: float = 0.15,
+    timeout_s: float = 1.0,
+) -> bytes:
+    drained = bytearray()
+    deadline = time.monotonic() + timeout_s
+    quiet_deadline = time.monotonic() + quiet_s
+    while time.monotonic() < deadline:
+        waiting = ser.in_waiting
+        if waiting:
+            chunk = ser.read(waiting)
+            drained.extend(chunk)
+            quiet_deadline = time.monotonic() + quiet_s
+        elif time.monotonic() >= quiet_deadline:
+            break
+        time.sleep(0.005)
+    if drained:
+        logger.debug("Drained serial input %s", format_bytes(bytes(drained)))
+    return bytes(drained)
+
+
 def parse_int(value: str) -> int:
     return int(value, 0)
+
+
+def parse_path(value: str) -> Path:
+    return Path(value).expanduser()
+
+
+def load_coordinate_csv(path: Path) -> np.ndarray:
+    coordinates = []
+    with path.open("r", encoding="utf-8-sig", newline="") as csv_file:
+        reader = csv.DictReader(csv_file)
+        for row in reader:
+            try:
+                coordinates.append(
+                    (
+                        float(row["X"]),
+                        float(row["Y"]),
+                        float(row["Z"]),
+                    )
+                )
+            except KeyError as exc:
+                raise ValueError(
+                    f"Coordinate file {path} must contain X, Y, and Z columns"
+                ) from exc
+    if not coordinates:
+        raise ValueError(f"Coordinate file {path} is empty")
+    return np.asarray(coordinates, dtype=np.float64)
+
+
+def load_digit_coordinates(digits: list[DigitConfig]) -> dict[str, np.ndarray]:
+    coordinates: dict[str, np.ndarray] = {}
+    cache: dict[Path, np.ndarray] = {}
+    for digit in digits:
+        if digit.coordinate_path is None:
+            continue
+        path = digit.coordinate_path
+        if path not in cache:
+            cache[path] = load_coordinate_csv(path)
+        digit_coordinates = cache[path]
+        if len(digit_coordinates) != digit.force_points:
+            raise ValueError(
+                f"{digit.name} coordinate count mismatch: {path} has "
+                f"{len(digit_coordinates)} points, but {digit.force_points} "
+                "force points are configured"
+            )
+        coordinates[digit.name] = digit_coordinates
+    return coordinates
 
 
 def build_read_frame(device_address: int, address: int, data_length: int) -> bytes:
@@ -332,39 +419,85 @@ def read_response(
     )
 
 
-def read_adapter_response(ser: serial.Serial, timeout_s: float) -> bytes:
-    response = b""
-    raw_response = b""
+def read_adapter_response(
+    ser: serial.Serial,
+    timeout_s: float,
+    *,
+    expected_function: Optional[int] = None,
+    expected_address: Optional[int] = None,
+    max_data_length: int = DEFAULT_MAX_RESPONSE_BODY_LENGTH,
+) -> bytes:
+    response = bytearray()
+    raw_response = bytearray()
     deadline = time.monotonic() + timeout_s
 
     while time.monotonic() < deadline:
+        while True:
+            head_index = response.find(FRAME_HEAD_RESPONSE)
+            if head_index < 0:
+                keep = response[-1:] if response.endswith(FRAME_HEAD_RESPONSE[:1]) else b""
+                response.clear()
+                response.extend(keep)
+                break
+            if head_index > 0:
+                del response[:head_index]
+
+            if len(response) < 9:
+                break
+
+            data_length = int.from_bytes(response[6:8], "little")
+            if data_length > max_data_length:
+                logger.debug(
+                    "Discarding invalid adapter candidate: data_length=%s raw=%s",
+                    data_length,
+                    bytes(response).hex(" ").upper(),
+                )
+                del response[0]
+                continue
+            expected_total_length = 8 + data_length + 1
+            if len(response) < expected_total_length:
+                break
+
+            frame = bytes(response[:expected_total_length])
+            expected_lrc = calculate_lrc(frame[:-1])
+            if frame[-1] != expected_lrc:
+                logger.debug(
+                    "Discarding adapter candidate with LRC mismatch: "
+                    "calculated 0x%02X, got 0x%02X; raw=%s",
+                    expected_lrc,
+                    frame[-1],
+                    format_bytes(frame),
+                )
+                del response[0]
+                continue
+
+            function = frame[3]
+            address = int.from_bytes(frame[4:6], "little")
+            if (
+                expected_function is not None
+                and function != expected_function
+                or expected_address is not None
+                and address != expected_address
+            ):
+                logger.debug(
+                    "Discarding stale adapter response: function=0x%02X address=0x%04X raw=%s",
+                    function,
+                    address,
+                    format_bytes(frame),
+                )
+                del response[:expected_total_length]
+                continue
+
+            del response[:expected_total_length]
+            logger.debug("RX adapter %s", format_bytes(frame))
+            return frame
+
         waiting = ser.in_waiting
         if waiting:
             chunk = ser.read(waiting)
-            raw_response += chunk
-            response += chunk
+            raw_response.extend(chunk)
+            response.extend(chunk)
             logger.debug("RX chunk %s", format_bytes(chunk))
-
-            head_index = response.find(FRAME_HEAD_RESPONSE)
-            if head_index < 0:
-                response = response[-1:] if response.endswith(FRAME_HEAD_RESPONSE[:1]) else b""
-                continue
-            if head_index > 0:
-                response = response[head_index:]
-
-            if len(response) >= 9:
-                data_length = int.from_bytes(response[6:8], "little")
-                expected_total_length = 8 + data_length + 1
-                if len(response) >= expected_total_length:
-                    frame = response[:expected_total_length]
-                    expected_lrc = calculate_lrc(frame[:-1])
-                    if frame[-1] != expected_lrc:
-                        raise ValueError(
-                            f"Adapter response LRC mismatch: calculated 0x{expected_lrc:02X}, "
-                            f"got 0x{frame[-1]:02X}; frame={frame.hex(' ').upper()}"
-                        )
-                    logger.debug("RX adapter %s", format_bytes(frame))
-                    return frame
 
         time.sleep(0.001)
 
@@ -372,25 +505,53 @@ def read_adapter_response(ser: serial.Serial, timeout_s: float) -> bytes:
         raise TimeoutError("No adapter response received")
     raise TimeoutError(
         f"Incomplete adapter response: got {len(raw_response)} raw bytes; "
-        f"raw={raw_response.hex(' ').upper()}"
+        f"raw={bytes(raw_response).hex(' ').upper()}"
     )
 
 
-def read_adapter_version(ser: serial.Serial, response_timeout_s: float) -> Optional[str]:
-    ser.reset_input_buffer()
-    bytes_sent = ser.write(READ_VERSION_FRAME)
-    if bytes_sent != len(READ_VERSION_FRAME):
-        raise IOError(
-            f"Serial write incomplete: sent {bytes_sent}/{len(READ_VERSION_FRAME)} bytes"
+def read_adapter_version(
+    ser: serial.Serial,
+    response_timeout_s: float,
+    retries: int = 3,
+) -> Optional[str]:
+    last_error: Optional[Exception] = None
+    for attempt in range(1, max(1, retries) + 1):
+        ser.reset_input_buffer()
+        bytes_sent = ser.write(READ_VERSION_FRAME)
+        if bytes_sent != len(READ_VERSION_FRAME):
+            raise IOError(
+                f"Serial write incomplete: sent {bytes_sent}/{len(READ_VERSION_FRAME)} bytes"
+            )
+        logger.debug(
+            "TX adapter version %s attempt %s/%s",
+            READ_VERSION_FRAME.hex(" ").upper(),
+            attempt,
+            max(1, retries),
         )
-    logger.debug("TX adapter version %s", READ_VERSION_FRAME.hex(" ").upper())
 
-    response = read_adapter_response(ser, response_timeout_s)
+        try:
+            response = read_adapter_response(
+                ser,
+                response_timeout_s,
+                expected_function=0x03,
+                expected_address=0x0000,
+            )
+            break
+        except TimeoutError as exc:
+            last_error = exc
+            if attempt >= max(1, retries):
+                raise
+            logger.debug("Adapter version probe attempt %s failed: %s", attempt, exc)
+            time.sleep(0.1)
+    else:
+        raise TimeoutError("No adapter version response received") from last_error
+
     if response[3] != 0x03:
         raise ValueError(f"Unexpected version response function: 0x{response[3]:02X}")
     data = response[8:-1]
     version = data.decode("ascii", errors="ignore").strip()
     logger.info("Adapter version: %s", version or data.hex(" ").upper())
+    drain_serial_input(ser)
     return version or None
 
 
@@ -413,7 +574,12 @@ def read_adapter_register(
         raise IOError(f"Serial write incomplete: sent {bytes_sent}/{len(frame)} bytes")
     logger.debug("TX adapter read %s", frame.hex(" ").upper())
 
-    response = read_adapter_response(ser, response_timeout_s)
+    response = read_adapter_response(
+        ser,
+        response_timeout_s,
+        expected_function=0x03,
+        expected_address=address,
+    )
     if response[3] != 0x03:
         raise ValueError(f"Unexpected adapter read response function: 0x{response[3]:02X}")
     returned_address = int.from_bytes(response[4:6], "little")
@@ -465,43 +631,69 @@ def read_auto_push_frame(
     ser: serial.Serial,
     timeout_s: float,
     max_body_length: int = DEFAULT_MAX_RESPONSE_BODY_LENGTH,
+    buffer: Optional[bytearray] = None,
 ) -> bytes:
-    response = b""
-    raw_response = b""
+    response = buffer if buffer is not None else bytearray()
+    raw_response = bytearray()
     expected_total_length: Optional[int] = None
     deadline = time.monotonic() + timeout_s
 
     while time.monotonic() < deadline:
+        while True:
+            head_index = response.find(FRAME_HEAD_AUTO_PUSH)
+            if head_index < 0:
+                keep = response[-1:] if response.endswith(FRAME_HEAD_AUTO_PUSH[:1]) else b""
+                response.clear()
+                response.extend(keep)
+                expected_total_length = None
+                break
+            if head_index > 0:
+                del response[:head_index]
+                expected_total_length = None
+
+            if len(response) < 5:
+                break
+
+            valid_frame_length = int.from_bytes(response[3:5], "little")
+            if valid_frame_length < 1 or valid_frame_length > max_body_length:
+                logger.debug(
+                    "Discarding invalid auto-push candidate: valid_frame_length=%s raw=%s",
+                    valid_frame_length,
+                    bytes(response).hex(" ").upper(),
+                )
+                del response[0]
+                expected_total_length = None
+                continue
+
+            expected_total_length = 5 + valid_frame_length + 1
+            if len(response) < expected_total_length:
+                break
+
+            frame = bytes(response[:expected_total_length])
+            expected_lrc = calculate_lrc(frame[:-1])
+            actual_lrc = frame[-1]
+            if expected_lrc != actual_lrc:
+                logger.debug(
+                    "Discarding auto-push candidate with LRC mismatch: "
+                    "calculated 0x%02X, got 0x%02X; raw=%s",
+                    expected_lrc,
+                    actual_lrc,
+                    format_bytes(frame),
+                )
+                del response[0]
+                expected_total_length = None
+                continue
+
+            del response[:expected_total_length]
+            logger.debug("RX auto-push %s", format_bytes(frame))
+            return frame
+
         waiting = ser.in_waiting
         if waiting:
             chunk = ser.read(waiting)
-            raw_response += chunk
-            response += chunk
+            raw_response.extend(chunk)
+            response.extend(chunk)
             logger.debug("RX chunk %s", format_bytes(chunk))
-
-            head_index = response.find(FRAME_HEAD_AUTO_PUSH)
-            if head_index < 0:
-                response = response[-1:] if response.endswith(FRAME_HEAD_AUTO_PUSH[:1]) else b""
-                continue
-            if head_index > 0:
-                response = response[head_index:]
-
-            if len(response) >= 5 and expected_total_length is None:
-                valid_frame_length = int.from_bytes(response[3:5], "little")
-                if valid_frame_length < 1 or valid_frame_length > max_body_length:
-                    logger.debug(
-                        "Discarding invalid auto-push candidate: valid_frame_length=%s raw=%s",
-                        valid_frame_length,
-                        response.hex(" ").upper(),
-                    )
-                    response = response[1:]
-                    continue
-                expected_total_length = 5 + valid_frame_length + 1
-
-            if expected_total_length is not None and len(response) >= expected_total_length:
-                frame = response[:expected_total_length]
-                logger.debug("RX auto-push %s", format_bytes(frame))
-                return frame
 
         time.sleep(0.001)
 
@@ -510,7 +702,7 @@ def read_auto_push_frame(
     raise TimeoutError(
         f"Incomplete Paxini auto-push frame: got {len(raw_response)} raw bytes, "
         f"expected {expected_total_length or 'unknown'}; "
-        f"raw={raw_response.hex(' ').upper()}"
+        f"raw={bytes(raw_response).hex(' ').upper()}"
     )
 
 
@@ -691,7 +883,12 @@ def write_adapter_register(
         raise IOError(f"Serial write incomplete: sent {bytes_sent}/{len(frame)} bytes")
     logger.debug("TX adapter %s", frame.hex(" ").upper())
 
-    response = read_adapter_response(ser, response_timeout_s)
+    response = read_adapter_response(
+        ser,
+        response_timeout_s,
+        expected_function=0x10,
+        expected_address=address,
+    )
     if response[3] != 0x10:
         raise ValueError(f"Unexpected adapter response function: 0x{response[3]:02X}")
     if int.from_bytes(response[4:6], "little") != address:
@@ -703,6 +900,18 @@ def write_adapter_register(
     if status != 0:
         raise RuntimeError(f"Adapter write failed with status 0x{status:02X}")
     return response
+
+
+def write_adapter_register_no_ack(
+    ser: serial.Serial,
+    address: int,
+    payload: bytes,
+) -> None:
+    frame = build_adapter_write_frame(address, payload)
+    bytes_sent = ser.write(frame)
+    if bytes_sent != len(frame):
+        raise IOError(f"Serial write incomplete: sent {bytes_sent}/{len(frame)} bytes")
+    logger.debug("TX adapter no-ack %s", frame.hex(" ").upper())
 
 
 def calibrate_stream_adapter(
@@ -1017,6 +1226,9 @@ class HandPaxiniReader:
         force_address: int,
         read_interval_s: float,
         response_timeout_s: float,
+        serial_settle_s: float,
+        dtr: bool,
+        rts: bool,
         reset_input: bool,
         scale_n: float,
         signed_z: bool,
@@ -1029,6 +1241,8 @@ class HandPaxiniReader:
         software_zero: bool,
         discard_startup_frames: int,
         median_window: int,
+        publish_rate_hz: float,
+        probe_adapter: bool,
     ) -> None:
         self.port = port
         self.baudrate = baudrate
@@ -1036,6 +1250,9 @@ class HandPaxiniReader:
         self.force_address = force_address
         self.read_interval_s = read_interval_s
         self.response_timeout_s = response_timeout_s
+        self.serial_settle_s = max(0.0, serial_settle_s)
+        self.dtr = dtr
+        self.rts = rts
         self.reset_input = reset_input
         self.scale_n = scale_n
         self.signed_z = signed_z
@@ -1048,30 +1265,86 @@ class HandPaxiniReader:
         self.software_zero = software_zero
         self.discard_startup_frames = discard_startup_frames
         self.median_window = max(1, median_window)
+        self.publish_rate_hz = max(0.1, publish_rate_hz)
+        self.probe_adapter = probe_adapter
         self.zero_offsets: dict[str, np.ndarray] = {}
 
         self._lock = threading.Lock()
         self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
+        self._read_thread: Optional[threading.Thread] = None
+        self._publish_thread: Optional[threading.Thread] = None
         self._serial: Optional[serial.Serial] = None
+        self._auto_push_buffer = bytearray()
+        self._raw_latest: Optional[HandSample] = None
+        self._raw_sequence = 0
+        self._published_sequence = 0
+        self._stats_start_s = time.monotonic()
+        self.acquired_count = 0
+        self.published_count = 0
         self.latest: Optional[HandSample] = None
         self.error: Optional[str] = None
         self.history = deque(maxlen=300)
 
     def start(self) -> None:
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
+        self._stats_start_s = time.monotonic()
+        self._publish_thread = threading.Thread(
+            target=self._publish_loop,
+            name="paxini-publisher",
+            daemon=True,
+        )
+        self._read_thread = threading.Thread(
+            target=self._run,
+            name="paxini-reader",
+            daemon=True,
+        )
+        self._publish_thread.start()
+        self._read_thread.start()
 
     def stop(self) -> None:
         self._stop.set()
-        if self._thread:
-            self._thread.join(timeout=2.0)
+        if self._read_thread:
+            self._read_thread.join(timeout=2.0)
+        if self._publish_thread:
+            self._publish_thread.join(timeout=2.0)
         if self._serial and self._serial.is_open:
             self._serial.close()
 
-    def snapshot(self) -> tuple[Optional[HandSample], Optional[str], list[HandSample]]:
+    def snapshot(self) -> tuple[Optional[HandSample], Optional[str], list[HandSample], dict[str, float]]:
         with self._lock:
-            return self.latest, self.error, list(self.history)
+            elapsed_s = max(time.monotonic() - self._stats_start_s, 1e-9)
+            stats = {
+                "rx_hz": self.acquired_count / elapsed_s,
+                "publish_hz": self.published_count / elapsed_s,
+            }
+            return self.latest, self.error, list(self.history), stats
+
+    def _record_sample(self, sample: HandSample) -> None:
+        with self._lock:
+            self._raw_latest = sample
+            self._raw_sequence += 1
+            self.acquired_count += 1
+            self.error = None
+
+    def _publish_loop(self) -> None:
+        interval_s = 1.0 / self.publish_rate_hz
+        next_publish_s = time.monotonic()
+        while not self._stop.is_set():
+            with self._lock:
+                if (
+                    self._raw_latest is not None
+                    and self._raw_sequence != self._published_sequence
+                ):
+                    self.latest = self._raw_latest
+                    self._published_sequence = self._raw_sequence
+                    self.published_count += 1
+                    self.history.append(self.latest)
+
+            next_publish_s += interval_s
+            sleep_s = next_publish_s - time.monotonic()
+            if sleep_s <= 0:
+                next_publish_s = time.monotonic()
+                continue
+            self._stop.wait(sleep_s)
 
     def _run(self) -> None:
         try:
@@ -1084,8 +1357,21 @@ class HandPaxiniReader:
                 timeout=1,
                 write_timeout=0.5,
                 inter_byte_timeout=0.001,
+                exclusive=True,
                 xonxoff=False,
                 rtscts=False,
+            )
+            self._serial.dtr = self.dtr
+            self._serial.rts = self.rts
+            time.sleep(self.serial_settle_s)
+            self._serial.reset_input_buffer()
+            self._serial.reset_output_buffer()
+            logger.info(
+                "Opened %s at %s baud with DTR=%s RTS=%s",
+                self.port,
+                self.baudrate,
+                self.dtr,
+                self.rts,
             )
 
             if self.mode == "stream":
@@ -1097,9 +1383,32 @@ class HandPaxiniReader:
                         "local baseline subtraction."
                     )
 
-                read_adapter_version(self._serial, self.response_timeout_s)
-                time.sleep(1.0)
+                if self.probe_adapter:
+                    read_adapter_version(self._serial, self.response_timeout_s)
+                    write_adapter_register(
+                        self._serial,
+                        BOARD_AUTO_POST_BACK_DATA_TYPE_ADDRESS,
+                        bytes([AUTO_PUSH_DATA_TYPE_RESULTANT_AND_DISTRIBUTED]),
+                        self.response_timeout_s,
+                        reset_input=True,
+                    )
+                    logger.info("Configured auto-push stream for resultant + distributed force")
+                else:
+                    self._serial.write(DISABLE_AUTO_PUSH_FRAME)
+                    time.sleep(0.2)
+                    drain_serial_input(self._serial)
+                    write_adapter_register_no_ack(
+                        self._serial,
+                        BOARD_AUTO_POST_BACK_DATA_TYPE_ADDRESS,
+                        bytes([AUTO_PUSH_DATA_TYPE_RESULTANT_AND_DISTRIBUTED]),
+                    )
+                    time.sleep(0.05)
+                    drain_serial_input(self._serial)
+                    logger.info(
+                        "Sent auto-push stream config for resultant + distributed force"
+                    )
                 self._serial.reset_input_buffer()
+                self._auto_push_buffer.clear()
                 bytes_sent = self._serial.write(ENABLE_AUTO_PUSH_FRAME)
                 if bytes_sent != len(ENABLE_AUTO_PUSH_FRAME):
                     raise IOError(
@@ -1113,6 +1422,7 @@ class HandPaxiniReader:
                         self._serial,
                         self.response_timeout_s,
                         max_body_length=self.max_body_length,
+                        buffer=self._auto_push_buffer,
                     )
                 if self.discard_startup_frames > 0:
                     logger.info("Discarded %s startup stream frames", self.discard_startup_frames)
@@ -1128,6 +1438,7 @@ class HandPaxiniReader:
                             self._serial,
                             self.response_timeout_s,
                             max_body_length=self.max_body_length,
+                            buffer=self._auto_push_buffer,
                         )
                         baseline_samples.append(
                             parse_auto_push_digits(
@@ -1147,6 +1458,7 @@ class HandPaxiniReader:
                         self._serial,
                         self.response_timeout_s,
                         max_body_length=self.max_body_length,
+                        buffer=self._auto_push_buffer,
                     )
                     digit_samples = parse_auto_push_digits(
                         parse_auto_push_frame(frame),
@@ -1158,11 +1470,9 @@ class HandPaxiniReader:
                     filter_buffer.append(digit_samples)
                     if self.median_window > 1 and len(filter_buffer) >= self.median_window:
                         digit_samples = median_filter_samples(list(filter_buffer))
-                    sample = HandSample(timestamp_s=time.time(), digits=digit_samples)
-                    with self._lock:
-                        self.latest = sample
-                        self.error = None
-                        self.history.append(sample)
+                    self._record_sample(
+                        HandSample(timestamp_s=time.time(), digits=digit_samples)
+                    )
             elif self.mode == "board-request":
                 if self.calibrate:
                     logger.warning(
@@ -1199,11 +1509,9 @@ class HandPaxiniReader:
                     if self.median_window > 1 and len(filter_buffer) >= self.median_window:
                         digit_samples = median_filter_samples(list(filter_buffer))
 
-                    sample = HandSample(timestamp_s=timestamp_s, digits=digit_samples)
-                    with self._lock:
-                        self.latest = sample
-                        self.error = None
-                        self.history.append(sample)
+                    self._record_sample(
+                        HandSample(timestamp_s=timestamp_s, digits=digit_samples)
+                    )
                     time.sleep(self.read_interval_s)
             elif self.mode == "native-request":
                 if self.calibrate:
@@ -1232,15 +1540,14 @@ class HandPaxiniReader:
                         )
                         digit_samples[digit.name] = DigitSample(timestamp_s, vectors)
 
-                    sample = HandSample(timestamp_s=timestamp_s, digits=digit_samples)
-                    with self._lock:
-                        self.latest = sample
-                        self.error = None
-                        self.history.append(sample)
+                    self._record_sample(
+                        HandSample(timestamp_s=timestamp_s, digits=digit_samples)
+                    )
                     time.sleep(self.read_interval_s)
             else:
                 raise ValueError(f"Unsupported mode {self.mode!r}")
         except Exception as exc:
+            logger.exception("Paxini reader stopped")
             with self._lock:
                 self.error = str(exc)
         finally:
@@ -1253,6 +1560,8 @@ class HandPaxiniReader:
                     )
                 except serial.SerialException:
                     pass
+            if self._serial and self._serial.is_open:
+                self._serial.close()
 
 
 def grid_positions(point_count: int) -> tuple[np.ndarray, np.ndarray]:
@@ -1282,18 +1591,202 @@ def empty_figure(title: str, message: str = "Waiting for tactile data..."):
     return fig
 
 
-def make_digit_figure(name: str, sample: Optional[DigitSample], component: str):
+def component_values(vectors: np.ndarray, component: str) -> tuple[np.ndarray, np.ndarray]:
+    component_index = {"Fx": 0, "Fy": 1, "Fz": 2, "|F|": 3}[component]
+    magnitudes = np.linalg.norm(vectors, axis=1)
+    values = magnitudes if component_index == 3 else vectors[:, component_index]
+    return values, magnitudes
+
+
+def make_digit_figure(
+    name: str,
+    sample: Optional[DigitSample],
+    component: str,
+    coordinates_mm: Optional[np.ndarray],
+    plot_mode: str,
+    show_vectors: bool,
+):
     if sample is None:
         return empty_figure(f"{name.title()} Force Vectors")
 
-    component_index = {"Fx": 0, "Fy": 1, "Fz": 2, "|F|": 3}[component]
     vectors = sample.vectors_n
-    values = (
-        np.linalg.norm(vectors, axis=1)
-        if component_index == 3
-        else vectors[:, component_index]
-    )
-    magnitudes = np.linalg.norm(vectors, axis=1)
+    values, magnitudes = component_values(vectors, component)
+
+    if (
+        coordinates_mm is not None
+        and len(coordinates_mm) == len(vectors)
+        and plot_mode == "2d"
+    ):
+        point_ids = np.arange(1, len(vectors) + 1)
+        fx = vectors[:, 0]
+        fy = vectors[:, 1]
+        fz = vectors[:, 2]
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scattergl(
+                x=coordinates_mm[:, 0],
+                y=coordinates_mm[:, 1],
+                mode="markers",
+                marker={
+                    "size": 11 if len(vectors) > 80 else 13,
+                    "color": values,
+                    "colorscale": "Viridis",
+                    "colorbar": {"title": f"{component} (N)"},
+                    "line": {"color": "#111827", "width": 1},
+                },
+                customdata=np.column_stack(
+                    [
+                        point_ids,
+                        coordinates_mm[:, 0],
+                        coordinates_mm[:, 1],
+                        coordinates_mm[:, 2],
+                        fx,
+                        fy,
+                        fz,
+                        magnitudes,
+                    ]
+                ),
+                hovertemplate=(
+                    "point=%{customdata[0]:.0f}<br>"
+                    "X width=%{customdata[1]:.2f} mm<br>"
+                    "Y length=%{customdata[2]:.2f} mm<br>"
+                    "Z height=%{customdata[3]:.2f} mm<br>"
+                    "Fx=%{customdata[4]:.2f} N<br>"
+                    "Fy=%{customdata[5]:.2f} N<br>"
+                    "Fz=%{customdata[6]:.2f} N<br>"
+                    "|F|=%{customdata[7]:.2f} N<extra></extra>"
+                ),
+                name="force points",
+            )
+        )
+        if show_vectors:
+            coordinate_span = max(
+                float(np.ptp(coordinates_mm[:, 0])),
+                float(np.ptp(coordinates_mm[:, 1])),
+                1.0,
+            )
+            max_xy = max(float(np.max(np.hypot(fx, fy))), 1.0)
+            scale = 0.12 * coordinate_span / max_xy
+            line_x = []
+            line_y = []
+            for point, vector in zip(coordinates_mm, vectors[:, :2] * scale):
+                line_x.extend([point[0], point[0] + vector[0], None])
+                line_y.extend([point[1], point[1] + vector[1], None])
+            fig.add_trace(
+                go.Scattergl(
+                    x=line_x,
+                    y=line_y,
+                    mode="lines",
+                    line={"color": "#D62728", "width": 2},
+                    hoverinfo="skip",
+                    name="Fx/Fy direction",
+                )
+            )
+        fig.update_layout(
+            title=f"{name.title()} {len(vectors)} Force Points",
+            template="plotly_white",
+            xaxis_title="X width (mm)",
+            yaxis_title="Y length (mm)",
+            margin={"l": 45, "r": 10, "t": 45, "b": 40},
+            showlegend=False,
+            uirevision=name,
+            transition={"duration": 0},
+        )
+        fig.update_yaxes(scaleanchor="x", scaleratio=1)
+        return fig
+
+    if (
+        coordinates_mm is not None
+        and len(coordinates_mm) == len(vectors)
+        and plot_mode == "3d"
+    ):
+        point_ids = np.arange(1, len(vectors) + 1)
+        fx = vectors[:, 0]
+        fy = vectors[:, 1]
+        fz = vectors[:, 2]
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter3d(
+                x=coordinates_mm[:, 0],
+                y=coordinates_mm[:, 1],
+                z=coordinates_mm[:, 2],
+                mode="markers",
+                marker={
+                    "size": 4 if len(vectors) > 80 else 5,
+                    "color": values,
+                    "colorscale": "Viridis",
+                    "colorbar": {"title": f"{component} (N)"},
+                    "line": {"color": "#111827", "width": 1},
+                },
+                customdata=np.column_stack(
+                    [
+                        point_ids,
+                        coordinates_mm[:, 0],
+                        coordinates_mm[:, 1],
+                        coordinates_mm[:, 2],
+                        fx,
+                        fy,
+                        fz,
+                        magnitudes,
+                    ]
+                ),
+                hovertemplate=(
+                    "point=%{customdata[0]:.0f}<br>"
+                    "X width=%{customdata[1]:.2f} mm<br>"
+                    "Y length=%{customdata[2]:.2f} mm<br>"
+                    "Z height=%{customdata[3]:.2f} mm<br>"
+                    "Fx=%{customdata[4]:.2f} N<br>"
+                    "Fy=%{customdata[5]:.2f} N<br>"
+                    "Fz=%{customdata[6]:.2f} N<br>"
+                    "|F|=%{customdata[7]:.2f} N<extra></extra>"
+                ),
+                name="force points",
+            )
+        )
+        if show_vectors:
+            coordinate_span = max(
+                float(np.ptp(coordinates_mm[:, 0])),
+                float(np.ptp(coordinates_mm[:, 1])),
+                float(np.ptp(coordinates_mm[:, 2])),
+                1.0,
+            )
+            max_force = max(float(np.max(magnitudes)), 1.0)
+            vector_scale = 0.16 * coordinate_span / max_force
+            line_x = []
+            line_y = []
+            line_z = []
+            for point, vector in zip(coordinates_mm, vectors * vector_scale):
+                line_x.extend([point[0], point[0] + vector[0], None])
+                line_y.extend([point[1], point[1] + vector[1], None])
+                line_z.extend([point[2], point[2] + vector[2], None])
+            fig.add_trace(
+                go.Scatter3d(
+                    x=line_x,
+                    y=line_y,
+                    z=line_z,
+                    mode="lines",
+                    line={"color": "#D62728", "width": 3},
+                    hoverinfo="skip",
+                    name="force direction",
+                )
+            )
+        fig.update_layout(
+            title=f"{name.title()} {len(vectors)} Force Points",
+            template="plotly_white",
+            margin={"l": 0, "r": 0, "t": 45, "b": 0},
+            showlegend=False,
+            scene={
+                "xaxis_title": "X width (mm)",
+                "yaxis_title": "Y length (mm)",
+                "zaxis_title": "Z height (mm)",
+                "aspectmode": "data",
+                "camera": {"eye": {"x": 1.5, "y": -1.8, "z": 1.2}},
+            },
+            uirevision=name,
+            transition={"duration": 0},
+        )
+        return fig
+
     x, y = grid_positions(len(vectors))
 
     fx = vectors[:, 0]
@@ -1308,7 +1801,7 @@ def make_digit_figure(name: str, sample: Optional[DigitSample], component: str):
 
     fig = go.Figure()
     fig.add_trace(
-        go.Scatter(
+        go.Scattergl(
             x=x,
             y=y,
             mode="markers",
@@ -1321,7 +1814,7 @@ def make_digit_figure(name: str, sample: Optional[DigitSample], component: str):
             },
             customdata=np.column_stack(
                 [
-                    np.arange(len(vectors)),
+                    np.arange(1, len(vectors) + 1),
                     vectors[:, 0],
                     vectors[:, 1],
                     vectors[:, 2],
@@ -1329,7 +1822,7 @@ def make_digit_figure(name: str, sample: Optional[DigitSample], component: str):
                 ]
             ),
             hovertemplate=(
-                "point=%{customdata[0]}<br>"
+                "point=%{customdata[0]:.0f}<br>"
                 "Fx=%{customdata[1]:.2f} N<br>"
                 "Fy=%{customdata[2]:.2f} N<br>"
                 "Fz=%{customdata[3]:.2f} N<br>"
@@ -1338,16 +1831,17 @@ def make_digit_figure(name: str, sample: Optional[DigitSample], component: str):
             name="force points",
         )
     )
-    fig.add_trace(
-        go.Scatter(
-            x=line_x,
-            y=line_y,
-            mode="lines",
-            line={"color": "#D62728", "width": 2},
-            hoverinfo="skip",
-            name="Fx/Fy direction",
+    if show_vectors:
+        fig.add_trace(
+            go.Scattergl(
+                x=line_x,
+                y=line_y,
+                mode="lines",
+                line={"color": "#D62728", "width": 2},
+                hoverinfo="skip",
+                name="Fx/Fy direction",
+            )
         )
-    )
     fig.update_layout(
         title=f"{name.title()} {len(vectors)} Force Vectors",
         template="plotly_white",
@@ -1356,12 +1850,14 @@ def make_digit_figure(name: str, sample: Optional[DigitSample], component: str):
         yaxis_autorange="reversed",
         margin={"l": 45, "r": 20, "t": 50, "b": 45},
         showlegend=False,
+        uirevision=name,
+        transition={"duration": 0},
     )
     fig.update_yaxes(scaleanchor="x", scaleratio=1)
     return fig
 
 
-def make_history_figure(history: list[HandSample]):
+def make_history_figure(history: list[HandSample], digit_order: list[str]):
     if not history:
         return empty_figure("Total Force History")
 
@@ -1369,7 +1865,8 @@ def make_history_figure(history: list[HandSample]):
     times = [sample.timestamp_s - t0 for sample in history]
 
     fig = go.Figure()
-    digit_names = sorted(history[-1].digits)
+    digit_names = [name for name in digit_order if name in history[-1].digits]
+    digit_names.extend(name for name in history[-1].digits if name not in digit_names)
     for digit_name in digit_names:
         values = []
         for sample in history:
@@ -1378,7 +1875,7 @@ def make_history_figure(history: list[HandSample]):
                 values.append(np.nan)
             else:
                 values.append(float(np.sum(np.linalg.norm(digit.vectors_n, axis=1))))
-        fig.add_trace(go.Scatter(x=times, y=values, mode="lines", name=digit_name))
+        fig.add_trace(go.Scattergl(x=times, y=values, mode="lines", name=digit_name))
 
     fig.update_layout(
         title="Total Distributed Force History",
@@ -1386,12 +1883,24 @@ def make_history_figure(history: list[HandSample]):
         xaxis_title="time (s)",
         yaxis_title="sum |F| (N)",
         margin={"l": 45, "r": 20, "t": 50, "b": 45},
+        uirevision="history",
+        transition={"duration": 0},
     )
     return fig
 
 
-def make_app(reader: HandPaxiniReader, update_ms: int):
+def make_app(
+    reader: HandPaxiniReader,
+    update_ms: int,
+    digit_coordinates: dict[str, np.ndarray],
+    plot_mode: str,
+    show_vectors: bool,
+):
     app = Dash(__name__)
+    digit_graphs = [
+        dcc.Graph(id=f"digit-{digit.name}", style={"height": "44vh"})
+        for digit in reader.digits
+    ]
     app.layout = html.Div(
         [
             html.Div(
@@ -1417,32 +1926,30 @@ def make_app(reader: HandPaxiniReader, update_ms: int):
                 style={"padding": "0 16px 8px 16px"},
             ),
             html.Div(
-                [
-                    dcc.Graph(id="thumb", style={"height": "58vh"}),
-                    dcc.Graph(id="index", style={"height": "58vh"}),
-                ],
+                digit_graphs,
                 style={
                     "display": "grid",
-                    "gridTemplateColumns": "1fr 1fr",
+                    "gridTemplateColumns": "repeat(auto-fit, minmax(360px, 1fr))",
                     "gap": "8px",
                 },
             ),
-            dcc.Graph(id="history", style={"height": "30vh"}),
+            dcc.Graph(id="history", style={"height": "28vh"}),
             dcc.Interval(id="tick", interval=update_ms, n_intervals=0),
         ],
         style={"fontFamily": "Arial, sans-serif"},
     )
 
+    outputs = [Output("status", "children")]
+    outputs.extend(Output(f"digit-{digit.name}", "figure") for digit in reader.digits)
+    outputs.append(Output("history", "figure"))
+
     @app.callback(
-        Output("status", "children"),
-        Output("thumb", "figure"),
-        Output("index", "figure"),
-        Output("history", "figure"),
+        outputs,
         Input("tick", "n_intervals"),
         Input("component", "value"),
     )
     def update(_n_intervals: int, component: str):
-        sample, error, history = reader.snapshot()
+        sample, error, history, stats = reader.snapshot()
         if error:
             status = f"Error: {error}"
         elif sample:
@@ -1450,28 +1957,37 @@ def make_app(reader: HandPaxiniReader, update_ms: int):
             for digit in reader.digits:
                 digit_sample = sample.digits.get(digit.name)
                 point_count = 0 if digit_sample is None else len(digit_sample.vectors_n)
+                geometry = "coords" if digit.name in digit_coordinates else "grid"
                 parts.append(
-                    f"{digit.name}=addr{digit.device_address}/{point_count}pts"
+                    f"{digit.name}=addr{digit.device_address}/{point_count}pts/{geometry}"
                 )
             status = (
                 f"mode={reader.mode} port={reader.port} baud={reader.baudrate} "
                 f"zero={'on' if reader.zero_offsets else 'off'} "
                 f"hwcal={'on' if reader.calibrate and reader.mode == 'native-request' else 'off'} "
                 f"median={reader.median_window} "
+                f"rx={stats['rx_hz']:.1f}Hz pub={stats['publish_hz']:.1f}Hz "
+                f"plot={plot_mode}{'+vec' if show_vectors else ''} "
                 f"force_address=0x{reader.force_address:08X} "
                 + " ".join(parts)
             )
         else:
             status = "Waiting for sensor data..."
 
-        thumb_sample = sample.digits.get("thumb") if sample else None
-        index_sample = sample.digits.get("index") if sample else None
-        return (
-            status,
-            make_digit_figure("thumb", thumb_sample, component),
-            make_digit_figure("index", index_sample, component),
-            make_history_figure(history),
-        )
+        figures = []
+        for digit in reader.digits:
+            digit_sample = sample.digits.get(digit.name) if sample else None
+            figures.append(
+                make_digit_figure(
+                    digit.name,
+                    digit_sample,
+                    component,
+                    digit_coordinates.get(digit.name),
+                    plot_mode,
+                    show_vectors,
+                )
+            )
+        return [status, *figures, make_history_figure(history, [d.name for d in reader.digits])]
 
     return app
 
@@ -1492,8 +2008,36 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--thumb-address", type=int, default=THUMB_DEVICE_ADDRESS)
     parser.add_argument("--index-address", type=int, default=INDEX_DEVICE_ADDRESS)
+    parser.add_argument("--middle-address", type=int, default=MIDDLE_DEVICE_ADDRESS)
+    parser.add_argument("--ring-address", type=int, default=RING_DEVICE_ADDRESS)
     parser.add_argument("--thumb-points", type=int, default=THUMB_FORCE_POINTS)
     parser.add_argument("--index-points", type=int, default=INDEX_FORCE_POINTS)
+    parser.add_argument("--middle-points", type=int, default=MIDDLE_FORCE_POINTS)
+    parser.add_argument("--ring-points", type=int, default=RING_FORCE_POINTS)
+    parser.add_argument(
+        "--thumb-coords",
+        type=parse_path,
+        default=THUMB_COORDS_PATH,
+        help="CSV with thumb force-point X/Y/Z coordinates.",
+    )
+    parser.add_argument(
+        "--index-coords",
+        type=parse_path,
+        default=FINGER_COORDS_PATH,
+        help="CSV with index force-point X/Y/Z coordinates.",
+    )
+    parser.add_argument(
+        "--middle-coords",
+        type=parse_path,
+        default=FINGER_COORDS_PATH,
+        help="CSV with middle force-point X/Y/Z coordinates.",
+    )
+    parser.add_argument(
+        "--ring-coords",
+        type=parse_path,
+        default=FINGER_COORDS_PATH,
+        help="CSV with ring force-point X/Y/Z coordinates.",
+    )
     parser.add_argument(
         "--force-address",
         type=parse_int,
@@ -1512,6 +2056,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--read-interval", type=float, default=DEFAULT_READ_INTERVAL_S)
     parser.add_argument("--response-timeout", type=float, default=1.0)
+    parser.add_argument(
+        "--serial-settle",
+        type=float,
+        default=DEFAULT_SERIAL_SETTLE_S,
+        help="Seconds to wait after opening the USB serial port before probing the adapter.",
+    )
+    parser.add_argument(
+        "--dtr",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Set USB serial DTR after opening. Paxini adapter usually responds with --no-dtr.",
+    )
+    parser.add_argument(
+        "--rts",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Set USB serial RTS after opening. Paxini adapter usually responds with --rts.",
+    )
     parser.add_argument(
         "--calibrate",
         action="store_true",
@@ -1555,6 +2117,15 @@ def parse_args() -> argparse.Namespace:
         help="Rolling median window for stream samples. Use 1 to disable.",
     )
     parser.add_argument(
+        "--publish-rate-hz",
+        type=float,
+        default=DEFAULT_PUBLISH_RATE_HZ,
+        help=(
+            "Rate for publishing the latest acquired sample to the web layer. "
+            "Sensor acquisition still runs as fast as frames arrive."
+        ),
+    )
+    parser.add_argument(
         "--max-body-length",
         type=int,
         default=DEFAULT_MAX_RESPONSE_BODY_LENGTH,
@@ -1566,7 +2137,32 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_READ_CHUNK_SIZE,
         help="Read distributed force bytes in chunks. Use 0 to request each digit in one frame.",
     )
-    parser.add_argument("--update-ms", type=int, default=DEFAULT_UPDATE_MS)
+    parser.add_argument(
+        "--update-ms",
+        type=int,
+        default=DEFAULT_UPDATE_MS,
+        help="Dash/browser refresh interval in milliseconds.",
+    )
+    parser.add_argument(
+        "--plot-mode",
+        choices=("2d", "3d"),
+        default="2d",
+        help="2d uses the physical X/Y coordinate projection; 3d shows X/Y/Z points.",
+    )
+    parser.add_argument(
+        "--show-vectors",
+        action="store_true",
+        help="Draw force direction line segments. Disabled by default for smoother plotting.",
+    )
+    parser.add_argument(
+        "--probe-adapter",
+        action="store_true",
+        help=(
+            "In stream mode, read the adapter version and wait for config-write ACKs "
+            "before enabling AA56 streaming. Disabled by default because some CDC "
+            "startup states deliver delayed AA55 responses."
+        ),
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--web-port", type=int, default=8050)
     parser.add_argument(
@@ -1590,9 +2186,20 @@ def main() -> None:
     load_dash()
 
     digits = [
-        DigitConfig("thumb", args.thumb_address, args.thumb_points),
-        DigitConfig("index", args.index_address, args.index_points),
+        DigitConfig("thumb", args.thumb_address, args.thumb_points, args.thumb_coords),
+        DigitConfig("index", args.index_address, args.index_points, args.index_coords),
+        DigitConfig("middle", args.middle_address, args.middle_points, args.middle_coords),
+        DigitConfig("ring", args.ring_address, args.ring_points, args.ring_coords),
     ]
+    digit_coordinates = load_digit_coordinates(digits)
+    logger.info(
+        "Loaded tactile coordinate maps: %s",
+        ", ".join(
+            f"{name}={len(coordinates)}pts"
+            for name, coordinates in digit_coordinates.items()
+        )
+        or "none",
+    )
     port = args.port or choose_port()
     mode = "board-request" if args.mode == "request" else args.mode
     reader = HandPaxiniReader(
@@ -1602,6 +2209,9 @@ def main() -> None:
         force_address=args.force_address,
         read_interval_s=args.read_interval,
         response_timeout_s=args.response_timeout,
+        serial_settle_s=args.serial_settle,
+        dtr=args.dtr,
+        rts=args.rts,
         reset_input=not args.keep_input_buffer,
         scale_n=args.scale,
         signed_z=args.signed_z,
@@ -1614,10 +2224,18 @@ def main() -> None:
         software_zero=args.software_zero,
         discard_startup_frames=args.discard_startup_frames,
         median_window=args.median_window,
+        publish_rate_hz=args.publish_rate_hz,
+        probe_adapter=args.probe_adapter,
     )
 
     reader.start()
-    app = make_app(reader, args.update_ms)
+    app = make_app(
+        reader,
+        args.update_ms,
+        digit_coordinates,
+        args.plot_mode,
+        args.show_vectors,
+    )
     try:
         print(f"Opening Dash viewer at http://{args.host}:{args.web_port}")
         app.run(host=args.host, port=args.web_port, debug=False)

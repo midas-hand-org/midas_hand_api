@@ -501,8 +501,8 @@ class MidasHand:
 
     def shutdown(
         self,
-        attempts: int = 10,
-        torque_retries: int = 10,
+        attempts: int = 5,
+        torque_retries: int = 5,
         retry_interval_s: float = 0.2,
     ) -> None:
         """Disable torque robustly and close the hand connection.

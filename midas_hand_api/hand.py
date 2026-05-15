@@ -12,7 +12,7 @@ from . import kinematics
 from .actuators import control_table as ct
 from .actuators.dynamixel_client import DynamixelClient, discover_ports
 from .config import HandConfig
-from .tactile import PaxiniSensor, TactileFrame
+from .tactile import PaxiniHandSensor
 
 
 class MidasHand:
@@ -22,7 +22,7 @@ class MidasHand:
         self,
         config: Optional[HandConfig] = None,
         autoconnect: bool = True,
-        tactile_sensor: Optional[PaxiniSensor] = None,
+        tactile_sensor: Optional[PaxiniHandSensor] = None,
     ):
         self.config = config or HandConfig()
         self.config.validate()
@@ -280,12 +280,33 @@ class MidasHand:
         motor_pos, motor_vel = self._read_motor_pos_vel()
         return self._expand_velocities(motor_vel, motor_pos)
 
-    def read_tactile(self) -> TactileFrame:
-        """Return one tactile frame from the configured tactile sensor."""
+    def read_tactile(self) -> dict[str, np.ndarray]:
+        """Return the latest tactile frame as ``dict[finger → (N, 3) array]``.
 
+        Columns are [Fx, Fy, Fz] in Newtons. Raises if no sensor is configured
+        or the stream has not started yet.
+        """
         if self.tactile_sensor is None:
             raise OSError("No tactile sensor is configured")
-        return self.tactile_sensor.read_frame()
+        return self.tactile_sensor.read_latest()
+
+    def read_tactile_fx(self) -> dict[str, np.ndarray]:
+        """Return Fx for each finger as ``dict[finger → (N,) array]`` in Newtons."""
+        if self.tactile_sensor is None:
+            raise OSError("No tactile sensor is configured")
+        return self.tactile_sensor.read_tactile_fx()
+
+    def read_tactile_fy(self) -> dict[str, np.ndarray]:
+        """Return Fy for each finger as ``dict[finger → (N,) array]`` in Newtons."""
+        if self.tactile_sensor is None:
+            raise OSError("No tactile sensor is configured")
+        return self.tactile_sensor.read_tactile_fy()
+
+    def read_tactile_fz(self) -> dict[str, np.ndarray]:
+        """Return Fz for each finger as ``dict[finger → (N,) array]`` in Newtons."""
+        if self.tactile_sensor is None:
+            raise OSError("No tactile sensor is configured")
+        return self.tactile_sensor.read_tactile_fz()
 
     def _read_motor_pos(self) -> np.ndarray:
         return self._raw_to_motor_pos(self._client().read_pos())

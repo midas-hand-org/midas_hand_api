@@ -1,22 +1,17 @@
 # Midas Hand API
 
-Python API for a Dynamixel-based hand using XM335-T323-T actuators. The
-structure follows the LEAP Hand Python API: a low-level Dynamixel client plus a
-higher-level hand object.
-
-The package is organized around the hand rather than individual vendors:
+Python API for the Midas 13-motor Dynamixel hand (`XM335-T323-T` actuators)
+with Paxini GEN3 tactile sensing. Provides a low-level Dynamixel client, a
+high-level hand object, motor homing/calibration, and a full tactile sensor
+driver.
 
 ```text
 midas_hand_api/
   actuators/   # Dynamixel client and control-table constants
-  tactile/     # Paxini tactile API surface and frame/config types
-  hand.py      # integrated high-level MidasHand facade
-  homing.py    # motor homing and saved motor calibration
+  tactile/     # Paxini GEN3 high-speed board driver (AA56 auto-push stream)
+  hand.py      # MidasHand — unified interface for motors and tactile
+  homing.py    # motor homing and host-side calibration persistence
 ```
-
-`homing.py` is the current motor calibration workflow. A separate calibration
-package can be added later if tactile calibration grows beyond simple config
-fields.
 
 ## Setup
 
@@ -74,10 +69,14 @@ By default, the saved config is written to:
 ~/.midas_hand/config.yaml
 ```
 
+The calibration is saved to the **host computer**, not the hand itself. If you
+move the hand to a different machine, homing must be run again on that machine.
+
 Run homing on the first startup after assembly, after changing actuator horns or
-linkages, or whenever the physical relationship between motor raw position and
-joint zero changes. You do not need to home on every program start if the hand
-has not been reassembled; load the saved config instead.
+linkages, whenever the physical relationship between motor raw position and joint
+zero changes, or whenever you switch to a new host computer. You do not need to
+home on every program start if the hand and host have not changed; load the saved
+config instead.
 
 Saved calibration files store only hand-specific calibration fields keyed by
 motor ID:
@@ -131,21 +130,73 @@ Before using real grasps, calibrate `joint_signs` and joint limits in
 
 ## Tactile Sensors
 
-The package includes a provisional `midas_hand_api.tactile` namespace for the
-Paxini `PX6AX-GEN3-DP-S2015-Elite` sensor:
+The `midas_hand_api.tactile` module drives the Paxini GEN3 high-speed board
+(`PX6AX-GEN3-DP-S2015-Elite`) over USB serial using the AA56 auto-push stream.
+
+### Hardware layout
+
+| Finger | Force points | Board device address |
+|--------|-------------|----------------------|
+| thumb  | 127         | 1                    |
+| index  | 52          | 2                    |
+| middle | 52          | 3                    |
+| ring   | 52          | 4                    |
+
+The Paxini board connects via USB (typically `/dev/ttyUSB1`) at 921 600 baud.
+Make sure your user is in the `dialout` group (see **Setup** above).
+
+### Integrated with MidasHand
 
 ```python
-from midas_hand_api import PaxiniConfig, PaxiniSensor
+from midas_hand_api import HandConfig, MidasHand, PaxiniConfig, PaxiniHandSensor
 
-paxini = PaxiniSensor(PaxiniConfig(port="/dev/ttyUSB1"))
+hand_config = HandConfig.load()
+tactile = PaxiniHandSensor(PaxiniConfig(port="/dev/ttyUSB1"))
+
+with MidasHand(hand_config, tactile_sensor=tactile) as hand:
+    hand.configure(enable_torque=True)
+    data = hand.read_tactile()       # dict[str, ndarray (N, 3)]
+    fz = hand.read_tactile_fz()    # dict[str, ndarray (N,)]
 ```
 
-The public Paxini pages describe product specs and communication accessories,
-but not a Python SDK or packet protocol. `PaxiniSensor` is therefore a typed
-placeholder until the vendor SDK, serial protocol, SPI adapter protocol, or
-high-speed-board protocol is available. Once that transport is implemented,
-`PaxiniSensor` can be passed into `MidasHand(tactile_sensor=paxini)` and read
-through `hand.read_tactile()`. See `docs/paxini_px6ax_notes.md`.
+### Standalone usage
+
+```python
+from midas_hand_api import PaxiniConfig, PaxiniHandSensor
+
+config = PaxiniConfig(port="/dev/ttyUSB1")
+
+with PaxiniHandSensor(config) as sensor:
+    # read_latest() → dict[finger_name, ndarray shape (N, 3)]
+    # columns are [Fx, Fy, Fz] in Newtons
+    data = sensor.read_latest()
+    print(data["thumb"].shape)   # (127, 3)
+    print(data["index"].shape)   # (52, 3)
+
+    # Single-axis convenience accessors → dict[finger_name, ndarray shape (N,)]
+    fz = sensor.read_tactile_fz()
+    print(fz["index"])
+```
+
+`connect()` raises `RuntimeError` immediately if any finger listed in
+`PaxiniConfig.fingers` is not physically connected to the board. By default all
+four fingers are expected. To use a subset:
+
+```python
+config = PaxiniConfig(port="/dev/ttyUSB1", fingers=["index", "middle"])
+```
+
+### Key config options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `port` | *(required)* | Serial port, e.g. `"/dev/ttyUSB1"` |
+| `fingers` | all four | Ordered list of fingers to read |
+| `publish_rate_hz` | `60.0` | Rate at which `read_latest()` delivers a new value |
+| `median_window` | `3` | Rolling median window size; set `1` to disable |
+
+The reader thread consumes frames as fast as the board delivers them
+(hardware ceiling ~83.3 Hz). `publish_rate_hz` caps delivery independently.
 
 ## XM335-T323-T Defaults
 

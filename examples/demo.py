@@ -2,8 +2,8 @@
 
 Usage::
 
-    python examples/demo.py --paxini-port /dev/ttyACM0
-    python examples/demo.py --paxini-port /dev/ttyACM0 --hand-port /dev/ttyUSB0
+    python examples/demo.py
+    python examples/demo.py --hand-port /dev/ttyUSB0
     python examples/demo.py --paxini-port /dev/ttyACM0 --no-viz
 """
 
@@ -199,19 +199,19 @@ def run_kapandji(hand: MidasHand) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--paxini-port", default="/dev/ttyACM0", help="Paxini serial port")
+    parser.add_argument("--paxini-port", default=None, help="Paxini serial port (auto-detected if omitted)")
     parser.add_argument("--hand-port", default=None, help="Dynamixel hand port (auto-detected if omitted)")
     parser.add_argument("--no-viz", action="store_true", help="Skip the browser visualizer")
     parser.add_argument("--viz-port", type=int, default=8050)
     args = parser.parse_args()
 
-    sensor = PaxiniHandSensor(PaxiniConfig(port=args.paxini_port))
+    sensor = PaxiniHandSensor(PaxiniConfig(port=args.paxini_port))  # port=None → auto-detect
     sensor.connect()
     hand: MidasHand | None = None
     try:
         hand = MidasHand(load_config(args.hand_port), tactile_sensor=sensor)
         print(f"Hand connected on {hand.port}")
-        print(f"Paxini connected on {args.paxini_port}")
+        print(f"Paxini connected on {sensor.port}")
 
         if not args.no_viz:
             PaxiniVisualizer(hand.read_tactile).start_background(port=args.viz_port)

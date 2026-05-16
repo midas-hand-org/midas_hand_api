@@ -7,11 +7,17 @@ often read_latest() sees a new value (default 60 Hz).
 
 Typical usage::
 
-    config = PaxiniConfig(port="/dev/ttyUSB1")
+    # Auto-detect the Paxini board:
+    config = PaxiniConfig()
     with PaxiniHandSensor(config) as sensor:
         while True:
             data = sensor.read_latest()        # dict[str, ndarray (N, 3)]
             fz   = sensor.read_tactile_fz()    # dict[str, ndarray (N,)]
+
+    # Or specify a port explicitly:
+    config = PaxiniConfig(port="/dev/ttyACM0")
+    with PaxiniHandSensor(config) as sensor:
+        ...
 """
 
 from __future__ import annotations
@@ -21,10 +27,11 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 import serial
+import serial.tools.list_ports
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +62,38 @@ _DEFAULT_DISCARD_STARTUP_FRAMES = 5
 _DEFAULT_MEDIAN_WINDOW = 3
 _DEFAULT_SERIAL_SETTLE_S = 0.75
 _DEFAULT_RESPONSE_TIMEOUT_S = 1.0
+
+_PAXINI_ID_STRING = "paxini"
+
+
+def find_paxini_port() -> str:
+    """Return the serial port of the connected Paxini board.
+
+    Matches any port whose description or manufacturer contains ``"paxini"``
+    (case-insensitive).
+
+    Raises:
+        RuntimeError: If no Paxini device is found, or if multiple are found
+            (in which case the caller should specify ``port`` explicitly).
+    """
+    matches: List[str] = [
+        p.device
+        for p in serial.tools.list_ports.comports()
+        if _PAXINI_ID_STRING in (p.description or "").lower()
+        or _PAXINI_ID_STRING in (p.manufacturer or "").lower()
+    ]
+    if not matches:
+        raise RuntimeError(
+            "No Paxini device found. Check that the board is plugged in and "
+            "the USB driver is loaded."
+        )
+    if len(matches) > 1:
+        raise RuntimeError(
+            f"Multiple Paxini devices found: {matches}. "
+            "Specify the port explicitly via PaxiniConfig(port=...)."
+        )
+    logger.info("Auto-detected Paxini board on %s", matches[0])
+    return matches[0]
 
 # ---------------------------------------------------------------------------
 # Per-finger hardware defaults for the 4-finger Midas hand.
@@ -88,7 +127,9 @@ class PaxiniConfig:
     """Configuration for PaxiniHandSensor.
 
     Args:
-        port: Serial port, e.g. ``"/dev/ttyUSB1"``.
+        port: Serial port, e.g. ``"/dev/ttyACM0"``. If ``None`` (default),
+            the board is auto-detected by scanning for a device whose
+            description or manufacturer contains ``"paxini"``.
         fingers: Ordered list of finger names to read. Defaults to all four
             fingers (thumb, index, middle, ring). Every name in this list must
             be physically connected; connect() raises if any are missing.
@@ -108,7 +149,7 @@ class PaxiniConfig:
         rts: USB serial RTS line state. True is the Paxini board default.
     """
 
-    port: str
+    port: Optional[str] = None
     fingers: list[str] = field(default_factory=lambda: list(_DEFAULT_FINGERS))
     baudrate: int = _BAUDRATE
     publish_rate_hz: float = _DEFAULT_PUBLISH_HZ
@@ -363,6 +404,7 @@ class PaxiniHandSensor:
     def __init__(self, config: PaxiniConfig) -> None:
         self.config = config
         self._fingers = _build_fingers(config.fingers)
+        self.port: Optional[str] = config.port
 
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -394,19 +436,34 @@ class PaxiniHandSensor:
         if self._connected:
             raise RuntimeError("Already connected. Call disconnect() first.")
 
-        ser = serial.Serial(
-            port=self.config.port,
-            baudrate=self.config.baudrate,
-            bytesize=serial.EIGHTBITS,
-            parity=serial.PARITY_NONE,
-            stopbits=serial.STOPBITS_ONE,
-            timeout=1,
-            write_timeout=0.5,
-            inter_byte_timeout=0.001,
-            exclusive=True,
-            xonxoff=False,
-            rtscts=False,
-        )
+        if self.config.port is not None:
+            port = self.config.port
+        else:
+            print("No port specified — auto-detecting Paxini board...")
+            port = find_paxini_port()
+            print(f"Paxini board found on {port}")
+
+        self.port = port
+
+        try:
+            ser = serial.Serial(
+                port=port,
+                baudrate=self.config.baudrate,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=1,
+                write_timeout=0.5,
+                inter_byte_timeout=0.001,
+                exclusive=True,
+                xonxoff=False,
+                rtscts=False,
+            )
+        except serial.SerialException as exc:
+            raise serial.SerialException(
+                f"Could not open port '{port}'. Check the port is correct, "
+                "or omit port to auto-detect."
+            ) from exc
         ser.dtr = self.config.dtr
         ser.rts = self.config.rts
 
@@ -415,7 +472,7 @@ class PaxiniHandSensor:
         ser.reset_output_buffer()
         logger.info(
             "Opened %s at %d baud (DTR=%s RTS=%s)",
-            self.config.port,
+            port,
             self.config.baudrate,
             self.config.dtr,
             self.config.rts,

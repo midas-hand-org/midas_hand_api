@@ -117,7 +117,10 @@ class DynamixelClient:
         if self.is_connected:
             return
         if not self.port_handler.openPort():
-            raise OSError(f"Failed to open Dynamixel port {self.port_name}")
+            raise OSError(
+                f"Could not open port '{self.port_name}'. Check the port is correct, "
+                "or omit port to auto-detect."
+            )
         if not self.port_handler.setBaudRate(self.baudrate):
             self.port_handler.closePort()
             raise OSError(f"Failed to set Dynamixel baudrate {self.baudrate}")

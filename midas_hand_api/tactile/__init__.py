@@ -1,15 +1,10 @@
 """Tactile sensor backends and data types for the Midas hand."""
 
-from .paxini import (
-    DEFAULT_PAXINI_MODEL,
-    PaxiniConfig,
-    PaxiniSensor,
-    TactileFrame,
-)
+from .paxini import PaxiniConfig, PaxiniHandSensor
+from .paxini_visualizer import PaxiniVisualizer
 
 __all__ = [
-    "DEFAULT_PAXINI_MODEL",
     "PaxiniConfig",
-    "PaxiniSensor",
-    "TactileFrame",
+    "PaxiniHandSensor",
+    "PaxiniVisualizer",
 ]

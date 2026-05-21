@@ -102,10 +102,9 @@ At runtime, these maps are converted into arrays ordered to match `motor_ids`.
 `home_offsets` are raw actuator positions, in radians, where the software joint
 position is defined as zero.
 
-Controller gains, current limits, operating mode, encoder scale, baudrate, and
-model constants are code defaults in `HandConfig.xm335_t323()`. They are not
-persisted by homing, so tuning changes in code are not hidden by stale YAML
-values.
+Controller gains, current limits, operating mode, baudrate, and XM335-T323-T
+unit constants are code defaults in `HandConfig`. They are not persisted by
+homing, so tuning changes in code are not hidden by stale YAML values.
 
 ## Example
 
@@ -119,14 +118,26 @@ with MidasHand(config) as hand:
     print(hand.ping())
     print(hand.verify_models())
     hand.configure(enable_torque=True)
+    hand.set_motion_profile(
+        # None or 0.0 disables velocity-profile limiting.
+        profile_velocity_rad_s=1.5,
+        # None or 0.0 disables acceleration profiling.
+        profile_acceleration_rad_s2=10.0,
+    )
     hand.set_positions(np.zeros(13))
     print(hand.read_pos())
     print(hand.read_joint_pos())
     print(hand.read_pos_vel_cur())
 ```
 
-Before using real grasps, calibrate `joint_signs` and joint limits in
-`HandConfig` for the actual Midas hand mechanics.
+Joint directions follow the right-hand rule, with the thumb pointing along the
+servo horn axis. 
+
+**NOTE:** For robot learning or teleoperated demonstrations,
+its recommended to disable motion profiling with `profile_velocity_rad_s=None` and
+`profile_acceleration_rad_s2=None`. This removes extra actuator-side trajectory
+shaping; motion is still subject to current limits, gains, update rate, and
+contact.
 
 ## Tactile Sensors
 
@@ -203,7 +214,28 @@ The reader thread consumes frames as fast as the board delivers them
 - Protocol: 2.0
 - Resolution: 4096 counts/rev
 - Default baudrate: `1_000_000`
-- Operating mode: current-based position control, value `5`
+- Default operating mode: current-based position control, value `5`
 - Model number checked by `verify_models()`: `1710`
 - Current unit: about `1 mA`
-- Goal current limit default: `500`, max allowed by config: `910`
+- Goal current limit default: `600`, max allowed by config: `910`
+- Motion profile: velocity-based profile mode; profile acceleration is accepted
+  by the API in `rad/s^2` and converted to the XM335 unit of
+  `214.577 rev/min^2` per raw count.
+
+### Operating Modes
+
+The Midas hand uses XM335-T323-T actuators. The supported Dynamixel operating
+modes are:
+
+| Value | Mode | Use case |
+|-------|------|----------|
+| `0` | Current control | Direct torque/current experiments, low-level force behaviors, and diagnostics where the controller provides its own position or velocity loop. Use carefully because there is no position holding loop. |
+| `1` | Velocity control | Homing moves, continuous sweeps, spin-at-speed tests, and debugging motion direction or bus communication. This is not the normal grasping mode. |
+| `3` | Position control | Standard single-turn joint position mode. Use this for repeatable pose playback, calibration checks, and precise scripted motions when you want the actuator to prioritize tracking the commanded position. |
+| `4` | Extended position control | Multi-turn position commands for mechanisms that intentionally rotate beyond one revolution. The Midas hand joints normally should not need this. |
+| `5` | Current-based position control | Default. Still commands position, but also uses `Goal Current(102)` as the current/torque limit. Use this for robot learning, teleoperation, tactile interaction, and grasping because the hand can yield under contact instead of forcing the exact target as rigidly when the current limit is reached. |
+| `16` | PWM control | Raw voltage/PWM-style experiments and actuator characterization. This bypasses the normal current/position abstractions and should only be used for low-level testing. |
+
+`MidasHand.configure()` applies the default current-based position mode (`5`).
+If you change `HandConfig.operating_mode`, disable torque before switching modes.
+Changing modes resets profile settings and mode-specific gains on the actuator.

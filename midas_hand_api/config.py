@@ -61,7 +61,22 @@ def _coerce_motor_values(
             else:
                 raise ValueError(f"{name} is missing value for motor ID {motor_id}")
         return tuple(ordered)
-    return tuple(float(value) for value in values)
+
+    values_tuple = tuple(float(value) for value in values)
+    if len(values_tuple) == len(motor_ids):
+        return values_tuple
+    if len(values_tuple) == len(DEFAULT_MOTOR_IDS):
+        default_index_by_id = {
+            motor_id: index for index, motor_id in enumerate(DEFAULT_MOTOR_IDS)
+        }
+        if all(motor_id in default_index_by_id for motor_id in motor_ids):
+            return tuple(
+                values_tuple[default_index_by_id[motor_id]]
+                for motor_id in motor_ids
+            )
+        if len(set(values_tuple)) == 1:
+            return tuple(values_tuple[0] for _ in motor_ids)
+    return values_tuple
 
 
 def _motor_value_map(
@@ -116,16 +131,13 @@ def _filtered_passive_topology(
 
 @dataclass(frozen=True)
 class HandConfig:
-    """Runtime configuration for a Dynamixel-driven hand.
+    """Runtime configuration for the Midas Dynamixel hand.
 
-    The defaults are intentionally conservative placeholders for a 13-motor hand.
-    Update ``motor_ids``, ``home_offsets``, ``joint_signs``, and limits after
-    calibration against the real Midas hand.
+    Actuator model constants are fixed for the XM335-T323-T motors used by this
+    hand. This object keeps runtime connection settings and hand calibration.
     """
 
     motor_ids: Tuple[int, ...] = DEFAULT_MOTOR_IDS
-    motor_model: str = "XM335-T323-T"
-    expected_model_number: Optional[int] = ct.XM335_T323_MODEL_NUMBER
     port: Optional[str] = None
     baudrate: int = 1_000_000
 
@@ -139,14 +151,9 @@ class HandConfig:
 
     position_p_gain: int = 800
     position_i_gain: int = 0
-    position_d_gain: int = 450
+    position_d_gain: int = 500
     goal_current_limit: int = 600
-    max_goal_current_limit: int = ct.XM335_T323_MAX_CURRENT_LIMIT
     operating_mode: int = ct.OPERATING_MODE_CURRENT_BASED_POSITION
-
-    counts_per_rev: int = 4096
-    velocity_unit_rpm: float = 0.229
-    current_unit_ma: float = ct.XM335_T323_CURRENT_UNIT_MA
 
     home_offsets: Sequence[float] = field(
         default_factory=lambda: _repeat(0.0, len(DEFAULT_MOTOR_IDS))
@@ -164,6 +171,23 @@ class HandConfig:
     def __post_init__(self) -> None:
         motor_ids = tuple(int(motor_id) for motor_id in self.motor_ids)
         object.__setattr__(self, "motor_ids", motor_ids)
+        if (
+            tuple(self.passive_joint_indices) == DEFAULT_PASSIVE_JOINT_INDICES
+            and tuple(self.pip_motor_indices) == DEFAULT_PIP_MOTOR_INDICES
+        ):
+            selected_default_indices = [
+                DEFAULT_MOTOR_IDS.index(motor_id)
+                for motor_id in motor_ids
+                if motor_id in DEFAULT_MOTOR_IDS
+            ]
+            passive_joint_indices, pip_motor_indices = _filtered_passive_topology(
+                len(DEFAULT_MOTOR_IDS),
+                DEFAULT_PASSIVE_JOINT_INDICES,
+                DEFAULT_PIP_MOTOR_INDICES,
+                selected_default_indices,
+            )
+            object.__setattr__(self, "passive_joint_indices", passive_joint_indices)
+            object.__setattr__(self, "pip_motor_indices", pip_motor_indices)
         for name in _MOTOR_VALUE_FIELDS:
             object.__setattr__(
                 self,
@@ -185,13 +209,19 @@ class HandConfig:
     def position_scale(self) -> float:
         """Radians per encoder count."""
 
-        return 2.0 * pi / float(self.counts_per_rev)
+        return ct.XM335_T323_POSITION_UNIT_RAD
 
     @property
     def velocity_scale(self) -> float:
         """Radians/sec per raw velocity unit."""
 
-        return self.velocity_unit_rpm * 2.0 * pi / 60.0
+        return ct.XM335_T323_VELOCITY_UNIT_RAD_S
+
+    @property
+    def current_unit_ma(self) -> float:
+        """mA per raw current unit."""
+
+        return ct.XM335_T323_CURRENT_UNIT_MA
 
     @property
     def home_offsets_array(self) -> np.ndarray:
@@ -217,7 +247,9 @@ class HandConfig:
         }
         for name, values in motor_fields.items():
             if len(values) != n:
-                raise ValueError(f"{name} must have {n} values (one per motor), got {len(values)}")
+                raise ValueError(
+                    f"{name} must have {n} values (one per motor), got {len(values)}"
+                )
         if len(self.passive_joint_indices) != len(self.pip_motor_indices):
             raise ValueError(
                 "passive_joint_indices and pip_motor_indices must have the same length"
@@ -225,12 +257,13 @@ class HandConfig:
         for idx in self.pip_motor_indices:
             if idx >= n:
                 raise ValueError(
-                    f"pip_motor_indices contains {idx}, but only {n} motors are configured"
+                    "pip_motor_indices contains "
+                    f"{idx}, but only {n} motors are configured"
                 )
-        if self.goal_current_limit > self.max_goal_current_limit:
+        if self.goal_current_limit > ct.XM335_T323_MAX_CURRENT_LIMIT:
             raise ValueError(
                 "goal_current_limit must be <= "
-                f"{self.max_goal_current_limit} for {self.motor_model}"
+                f"{ct.XM335_T323_MAX_CURRENT_LIMIT} for XM335-T323-T"
             )
 
     @classmethod
@@ -241,39 +274,21 @@ class HandConfig:
         baudrate: int = 1_000_000,
         **overrides,
     ) -> "HandConfig":
-        n = len(motor_ids)
-        selected_default_indices = [
-            DEFAULT_MOTOR_IDS.index(motor_id)
-            for motor_id in motor_ids
-            if motor_id in DEFAULT_MOTOR_IDS
-        ]
-        passive_joint_indices, pip_motor_indices = _filtered_passive_topology(
-            len(DEFAULT_MOTOR_IDS),
-            DEFAULT_PASSIVE_JOINT_INDICES,
-            DEFAULT_PIP_MOTOR_INDICES,
-            selected_default_indices,
-        )
+        """Backward-compatible constructor; ``HandConfig()`` is XM335-only."""
+
+        for key in (
+            "motor_model",
+            "expected_model_number",
+            "max_goal_current_limit",
+            "counts_per_rev",
+            "velocity_unit_rpm",
+            "current_unit_ma",
+        ):
+            overrides.pop(key, None)
         values = {
             "motor_ids": motor_ids,
-            "motor_model": "XM335-T323-T",
-            "expected_model_number": ct.XM335_T323_MODEL_NUMBER,
             "port": port,
             "baudrate": baudrate,
-            "position_p_gain": 900,
-            "position_i_gain": 0,
-            "position_d_gain": 600,
-            "goal_current_limit": 600,
-            "max_goal_current_limit": ct.XM335_T323_MAX_CURRENT_LIMIT,
-            "operating_mode": ct.OPERATING_MODE_CURRENT_BASED_POSITION,
-            "counts_per_rev": 4096,
-            "velocity_unit_rpm": 0.229,
-            "current_unit_ma": ct.XM335_T323_CURRENT_UNIT_MA,
-            "home_offsets": _repeat(0.0, n),
-            "joint_signs": _repeat(1.0, n),
-            "joint_lower_limits": _repeat(-pi, n),
-            "joint_upper_limits": _repeat(pi, n),
-            "passive_joint_indices": passive_joint_indices,
-            "pip_motor_indices": pip_motor_indices,
         }
         values.update(overrides)
         return cls(**values)
@@ -400,7 +415,7 @@ class HandConfig:
         motor_ids = tuple(
             int(motor_id) for motor_id in data.get("motor_ids", DEFAULT_MOTOR_IDS)
         )
-        config = cls.xm335_t323(motor_ids=motor_ids)
+        config = cls(motor_ids=motor_ids)
         updates = {}
         for key in _MOTOR_VALUE_FIELDS:
             if key in data:

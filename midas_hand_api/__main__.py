@@ -68,7 +68,7 @@ def _scan_raw(
 
 
 def _disable_unselected_motors(config: HandConfig, selected_ids: set[int]) -> None:
-    scan_config = HandConfig.xm335_t323(
+    scan_config = HandConfig(
         motor_ids=DEFAULT_MOTOR_IDS,
         port=config.port,
         baudrate=config.baudrate,
@@ -85,7 +85,7 @@ def _disable_unselected_motors(config: HandConfig, selected_ids: set[int]) -> No
         return
 
     print(f"Disabling torque on unselected connected motors: {ids_to_disable}")
-    disable_config = HandConfig.xm335_t323(
+    disable_config = HandConfig(
         motor_ids=tuple(ids_to_disable),
         port=config.port,
         baudrate=config.baudrate,
@@ -192,7 +192,7 @@ def main() -> None:
         if config_updates:
             config = dataclasses.replace(config, **config_updates)
     elif homing_requested:
-        config = HandConfig.xm335_t323(
+        config = HandConfig(
             motor_ids=requested_motor_ids, port=args.port, baudrate=default_baudrate
         )
     elif DEFAULT_CONFIG_PATH.exists():
@@ -207,7 +207,7 @@ def main() -> None:
             config_updates["baudrate"] = args.baudrate
         config = dataclasses.replace(config, **config_updates)
     else:
-        config = HandConfig.xm335_t323(
+        config = HandConfig(
             motor_ids=requested_motor_ids, port=args.port, baudrate=default_baudrate
         )
 

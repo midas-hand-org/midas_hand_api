@@ -88,6 +88,12 @@ class MidasHand:
         client.set_torque_enabled(self.motor_ids, False)
         client.sync_write(
             self.motor_ids,
+            [ct.DRIVE_MODE_VELOCITY_BASED_PROFILE] * len(self.motor_ids),
+            ct.ADDR_DRIVE_MODE,
+            ct.LEN_DRIVE_MODE,
+        )
+        client.sync_write(
+            self.motor_ids,
             [self.config.operating_mode] * len(self.motor_ids),
             ct.ADDR_OPERATING_MODE,
             ct.LEN_OPERATING_MODE,
@@ -130,14 +136,12 @@ class MidasHand:
         return self._client().read_hardware_error_status(self.motor_ids)
 
     def verify_models(self) -> dict[int, int]:
-        """Return responding motors whose model number differs from config."""
+        """Return responding motors whose model number is not XM335-T323-T."""
 
-        if self.config.expected_model_number is None:
-            return {}
         return {
             motor_id: model_number
             for motor_id, model_number in self.ping().items()
-            if model_number != self.config.expected_model_number
+            if model_number != ct.XM335_T323_MODEL_NUMBER
         }
 
     def set_positions(self, positions_rad: Sequence[float], clip: bool = True) -> None:
@@ -463,29 +467,41 @@ class MidasHand:
     def set_motion_profile(
         self,
         profile_velocity_rad_s: Optional[float] = None,
-        profile_acceleration_raw: Optional[int] = None,
+        profile_acceleration_rad_s2: Optional[float] = None,
         motor_ids: Optional[Sequence[int]] = None,
     ) -> None:
         """Set Dynamixel position-profile velocity and acceleration.
 
-        ``profile_velocity_rad_s=None`` writes ``0``, which lets the actuator use
-        its unlimited velocity profile behavior. Acceleration is passed in raw
-        Dynamixel units because the exact unit is firmware/model dependent.
+        ``None`` or ``0.0`` writes ``0`` for either profile value, disabling
+        that profile limit. ``configure()`` sets the XM335 actuators to
+        velocity-based profile mode, where acceleration is written in units of
+        214.577 rev/min^2.
         """
 
         ids = list(motor_ids) if motor_ids is not None else self.motor_ids
         client = self._client()
-        if profile_acceleration_raw is not None:
-            client.sync_write(
-                ids,
-                [int(profile_acceleration_raw)] * len(ids),
-                ct.ADDR_PROFILE_ACCELERATION,
-                ct.LEN_PROFILE_ACCELERATION,
-            )
-        if profile_velocity_rad_s is not None:
-            raw_vel = max(1, int(profile_velocity_rad_s / client.vel_scale))
+        if profile_acceleration_rad_s2 is None:
+            raw_accel = 0
         else:
+            if profile_acceleration_rad_s2 < 0:
+                raise ValueError("profile_acceleration_rad_s2 must be non-negative")
+            raw_accel = _profile_acceleration_rad_s2_to_raw(
+                profile_acceleration_rad_s2
+            )
+        client.sync_write(
+            ids,
+            [raw_accel] * len(ids),
+            ct.ADDR_PROFILE_ACCELERATION,
+            ct.LEN_PROFILE_ACCELERATION,
+        )
+        if profile_velocity_rad_s is None:
             raw_vel = 0
+        else:
+            if profile_velocity_rad_s < 0:
+                raise ValueError("profile_velocity_rad_s must be non-negative")
+            raw_vel = 0 if profile_velocity_rad_s == 0 else max(
+                1, int(profile_velocity_rad_s / client.vel_scale)
+            )
         client.sync_write(
             ids,
             [raw_vel] * len(ids),
@@ -548,6 +564,17 @@ def scale(value, lower, upper):
     """Map ``[-1, 1]`` to ``[lower, upper]``."""
 
     return 0.5 * (np.asarray(value, dtype=np.float64) + 1.0) * (upper - lower) + lower
+
+
+def _profile_acceleration_rad_s2_to_raw(acceleration_rad_s2: float) -> int:
+    if acceleration_rad_s2 < 0:
+        raise ValueError("profile_acceleration_rad_s2 must be non-negative")
+    if acceleration_rad_s2 == 0:
+        return 0
+    raw = int(
+        round(acceleration_rad_s2 / ct.XM335_T323_PROFILE_ACCELERATION_UNIT_RAD_S2)
+    )
+    return max(1, raw)
 
 
 def _port_has_responders(port: str, baudrate: int, motor_ids: Sequence[int]) -> bool:

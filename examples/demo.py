@@ -74,7 +74,7 @@ THUMB_TARGETS_RAD = {
 # ---------------------------------------------------------------------------
 
 def load_config(hand_port: str | None) -> HandConfig:
-    cfg = HandConfig.load(DEFAULT_CONFIG_PATH) if DEFAULT_CONFIG_PATH.exists() else HandConfig.xm335_t323()
+    cfg = HandConfig.load(DEFAULT_CONFIG_PATH) if DEFAULT_CONFIG_PATH.exists() else HandConfig()
     if hand_port:
         from dataclasses import replace
         cfg = replace(cfg, port=hand_port)
@@ -220,7 +220,7 @@ def main() -> None:
         hand.enable_torque()
         hand.set_motion_profile(
             profile_velocity_rad_s=1.5,
-            profile_acceleration_raw=300,
+            profile_acceleration_rad_s2=50.0,
             motor_ids=hand.motor_ids,
         )
 

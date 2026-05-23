@@ -14,6 +14,7 @@ from .actuators import control_table as ct
 
 
 DEFAULT_MOTOR_IDS = tuple(range(0, 13))
+DEFAULT_DYNAMIXEL_BAUDRATE = 4_000_000
 
 # Default path for persisting hand calibration across sessions.
 # Lives in the user's home directory so it survives pip upgrades and
@@ -139,7 +140,7 @@ class HandConfig:
 
     motor_ids: Tuple[int, ...] = DEFAULT_MOTOR_IDS
     port: Optional[str] = None
-    baudrate: int = 1_000_000
+    baudrate: int = DEFAULT_DYNAMIXEL_BAUDRATE
 
     # Topology: passive joints and their driving PIP motors.
     # passive_joint_indices: positions in the full n_dof joint array where
@@ -271,7 +272,7 @@ class HandConfig:
         cls,
         motor_ids: Tuple[int, ...] = DEFAULT_MOTOR_IDS,
         port: Optional[str] = None,
-        baudrate: int = 1_000_000,
+        baudrate: int = DEFAULT_DYNAMIXEL_BAUDRATE,
         **overrides,
     ) -> "HandConfig":
         """Backward-compatible constructor; ``HandConfig()`` is XM335-only."""

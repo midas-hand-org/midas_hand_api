@@ -11,7 +11,11 @@ import time
 
 from . import HandConfig, MidasHand
 from .actuators import control_table as ct, discover_ports
-from .config import DEFAULT_CONFIG_PATH, DEFAULT_MOTOR_IDS
+from .config import (
+    DEFAULT_CONFIG_PATH,
+    DEFAULT_DYNAMIXEL_BAUDRATE,
+    DEFAULT_MOTOR_IDS,
+)
 from .homing import home_fingers, home_hand, home_thumb
 
 
@@ -143,7 +147,9 @@ def main() -> None:
         help="Print per-ID scan errors",
     )
     args = parser.parse_args()
-    default_baudrate = args.baudrate if args.baudrate is not None else 1_000_000
+    default_baudrate = (
+        args.baudrate if args.baudrate is not None else DEFAULT_DYNAMIXEL_BAUDRATE
+    )
 
     if args.scan:
         scan_ids = _parse_id_spec(args.scan_range)

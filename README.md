@@ -53,7 +53,7 @@ needs to be unplugged and replugged.
 
 ```bash
 source .venv/bin/activate
-python examples/smoke_test.py --port /dev/ttyUSB0 --baudrate 1000000
+python examples/smoke_test.py
 ```
 
 By default, the smoke test uses motor IDs `0` through `12`. If you only want to
@@ -71,7 +71,7 @@ all fingers to their software `0` position.
 
 ```bash
 source .venv/bin/activate
-python -m midas_hand_api --port /dev/ttyUSB0 --baudrate 1000000 --home
+python -m midas_hand_api --home
 ```
 
 By default, this targets motor IDs `0` through `12`. Use `--motors` if you want
@@ -228,7 +228,7 @@ The reader thread consumes frames as fast as the board delivers them
 
 - Protocol: 2.0
 - Resolution: 4096 counts/rev
-- Default baudrate: `1_000_000`
+- Default baudrate: `4_000_000`
 - Default operating mode: current-based position control, value `5`
 - Model number checked by `verify_models()`: `1710`
 - Current unit: about `1 mA`

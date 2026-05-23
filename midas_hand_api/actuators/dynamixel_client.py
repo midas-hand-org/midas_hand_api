@@ -24,6 +24,7 @@ from . import control_table as ct
 
 Number = Union[int, float]
 DXL_ALERT_BIT = 0x80
+DEFAULT_BAUDRATE = 4_000_000
 _USB_SERIAL_SYSFS = pathlib.Path("/sys/bus/usb-serial/devices")
 _LOW_LATENCY_TIMER_MS = 1
 _ANSI_BOLD_YELLOW = "\033[1;33m"
@@ -202,7 +203,7 @@ class DynamixelClient:
         self,
         motor_ids: Sequence[int],
         port: str = "/dev/ttyUSB0",
-        baudrate: int = 1_000_000,
+        baudrate: int = DEFAULT_BAUDRATE,
         lazy_connect: bool = False,
         pos_scale: float = 2.0 * 3.141592653589793 / 4096.0,
         vel_scale: float = 0.229 * 2.0 * 3.141592653589793 / 60.0,

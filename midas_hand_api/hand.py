@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import replace
 from typing import Optional, Sequence, Tuple, Union
@@ -13,6 +14,10 @@ from .actuators import control_table as ct
 from .actuators.dynamixel_client import DynamixelClient, discover_ports
 from .config import HandConfig
 from .tactile import PaxiniHandSensor
+
+
+_CONNECT_SCAN_ATTEMPTS = 5
+_CONNECT_SCAN_DELAY_S = 0.05
 
 
 class MidasHand:
@@ -42,15 +47,30 @@ class MidasHand:
 
         last_error: Optional[Exception] = None
         checked_ports = []
+        expected_ids = set(self.motor_ids)
         for port in ports:
             if port is None:
                 continue
             try:
-                if self.port is None and not _port_has_responders(
-                    port, self.config.baudrate, self.motor_ids
-                ):
+                scan_result = _scan_port_responders(
+                    port,
+                    self.config.baudrate,
+                    self.motor_ids,
+                )
+                if not scan_result:
                     checked_ports.append(port)
-                    continue
+                    if self.port is None:
+                        continue
+                    raise OSError(
+                        "No configured motor IDs responded on "
+                        f"{port} at {self.config.baudrate} baud"
+                    )
+                logging.info(
+                    "Dynamixel scan on %s at %d baud found motor IDs %s",
+                    port,
+                    self.config.baudrate,
+                    sorted(scan_result),
+                )
                 client = DynamixelClient(
                     self.motor_ids,
                     port=port,
@@ -63,6 +83,16 @@ class MidasHand:
                 self.dxl_client = client
                 self.port = port
                 self.config = replace(self.config, port=port)
+                missing = sorted(expected_ids - set(scan_result))
+                if missing:
+                    logging.warning(
+                        "Connected to %s at %d baud, but scan only saw motor IDs "
+                        "%s; missing configured IDs %s",
+                        port,
+                        self.config.baudrate,
+                        sorted(scan_result),
+                        missing,
+                    )
                 return
             except Exception as exc:
                 last_error = exc
@@ -577,20 +607,41 @@ def _profile_acceleration_rad_s2_to_raw(acceleration_rad_s2: float) -> int:
     return max(1, raw)
 
 
-def _port_has_responders(port: str, baudrate: int, motor_ids: Sequence[int]) -> bool:
+def _scan_port_responders(
+    port: str,
+    baudrate: int,
+    motor_ids: Sequence[int],
+    attempts: int = _CONNECT_SCAN_ATTEMPTS,
+    delay_s: float = _CONNECT_SCAN_DELAY_S,
+) -> dict[int, int]:
     import dynamixel_sdk
 
     port_handler = dynamixel_sdk.PortHandler(port)
     packet_handler = dynamixel_sdk.PacketHandler(ct.PROTOCOL_VERSION)
     if not port_handler.openPort():
-        return False
+        return {}
     try:
         if not port_handler.setBaudRate(int(baudrate)):
-            return False
-        for motor_id in motor_ids:
-            _, comm_result, _ = packet_handler.ping(port_handler, int(motor_id))
-            if comm_result == dynamixel_sdk.COMM_SUCCESS:
-                return True
-        return False
+            return {}
+
+        responders: dict[int, int] = {}
+        requested_ids = [int(motor_id) for motor_id in motor_ids]
+        attempt_count = max(1, int(attempts))
+        for attempt in range(attempt_count):
+            for motor_id in requested_ids:
+                if motor_id in responders:
+                    continue
+                model, comm_result, _ = packet_handler.ping(port_handler, motor_id)
+                if comm_result == dynamixel_sdk.COMM_SUCCESS:
+                    responders[motor_id] = int(model)
+            if len(responders) == len(requested_ids):
+                break
+            if delay_s > 0 and attempt < attempt_count - 1:
+                time.sleep(delay_s)
+        return responders
     finally:
         port_handler.closePort()
+
+
+def _port_has_responders(port: str, baudrate: int, motor_ids: Sequence[int]) -> bool:
+    return bool(_scan_port_responders(port, baudrate, motor_ids))

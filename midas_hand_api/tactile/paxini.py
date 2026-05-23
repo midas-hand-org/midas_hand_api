@@ -214,6 +214,20 @@ def _write_no_ack(ser: serial.Serial, address: int, payload: bytes) -> None:
     logger.debug("TX adapter no-ack %s", frame.hex(" ").upper())
 
 
+def _serial_port_label(ser: serial.Serial) -> str:
+    return str(getattr(ser, "port", None) or getattr(ser, "name", "unknown"))
+
+
+def _serial_io_error(
+    ser: serial.Serial,
+    action: str,
+    exc: BaseException,
+) -> serial.SerialException:
+    return serial.SerialException(
+        f"Paxini serial port {_serial_port_label(ser)} failed while {action}: {exc}"
+    )
+
+
 def _drain(
     ser: serial.Serial,
     *,
@@ -224,8 +238,15 @@ def _drain(
     deadline = time.monotonic() + timeout_s
     quiet_deadline = time.monotonic() + quiet_s
     while time.monotonic() < deadline:
-        if ser.in_waiting:
-            ser.read(ser.in_waiting)
+        try:
+            waiting = ser.in_waiting
+        except (OSError, serial.SerialException) as exc:
+            raise _serial_io_error(ser, "draining input", exc) from exc
+        if waiting:
+            try:
+                ser.read(waiting)
+            except (OSError, serial.SerialException) as exc:
+                raise _serial_io_error(ser, "draining input", exc) from exc
             quiet_deadline = time.monotonic() + quiet_s
         elif time.monotonic() >= quiet_deadline:
             break
@@ -284,9 +305,15 @@ def _read_frame(
             return frame
 
         # No complete frame yet — read more bytes from the serial port.
-        waiting = ser.in_waiting
+        try:
+            waiting = ser.in_waiting
+        except (OSError, serial.SerialException) as exc:
+            raise _serial_io_error(ser, "checking input", exc) from exc
         if waiting:
-            buffer.extend(ser.read(waiting))
+            try:
+                buffer.extend(ser.read(waiting))
+            except (OSError, serial.SerialException) as exc:
+                raise _serial_io_error(ser, "reading input", exc) from exc
         else:
             time.sleep(0.001)
 
@@ -551,7 +578,7 @@ class PaxiniHandSensor:
         if self._serial and self._serial.is_open:
             try:
                 self._serial.write(_DISABLE_AUTO_PUSH)
-            except serial.SerialException:
+            except (OSError, serial.SerialException):
                 pass
             self._serial.close()
         self._serial = None
@@ -571,6 +598,10 @@ class PaxiniHandSensor:
             RuntimeError: If not connected, or if no frame has arrived yet.
         """
         if not self._connected:
+            if self._error:
+                raise RuntimeError(
+                    f"PaxiniHandSensor reader is stopped: {self._error}"
+                )
             raise RuntimeError(
                 "PaxiniHandSensor is not connected. Call connect() first."
             )
@@ -621,12 +652,21 @@ class PaxiniHandSensor:
                 with self._lock:
                     self._raw_latest = sample
                     self._raw_seq += 1
+        except (OSError, serial.SerialException) as exc:
+            if not self._stop.is_set():
+                message = f"Paxini serial connection lost: {exc}"
+                logger.warning(message)
+                with self._lock:
+                    self._error = message
+                self._connected = False
+                self._stop.set()
         except Exception as exc:
             if not self._stop.is_set():
                 logger.exception("Paxini reader stopped unexpectedly")
                 with self._lock:
                     self._error = str(exc)
                 self._connected = False
+                self._stop.set()
 
     def _publish_loop(self) -> None:
         """Promote the latest raw sample to read_latest() at publish_rate_hz."""

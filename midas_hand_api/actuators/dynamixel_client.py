@@ -142,6 +142,14 @@ class DynamixelClient:
             self.connect()
         if not self.is_connected:
             raise OSError("Must call connect() first.")
+        # The SDK sets PortHandler.is_using True at the start of every txPacket
+        # and only clears it once the matching read returns. A Ctrl-C (or any
+        # exception) raised mid-transaction unwinds the stack before that clear,
+        # leaving the flag stuck True so every later packet fails with
+        # COMM_PORT_BUSY ("Port is in use!") -- e.g. the torque-disable on
+        # shutdown. This client is single-threaded, so the flag can never be
+        # legitimately True at a transaction boundary; reset it defensively.
+        self.port_handler.is_using = False
 
     def handle_packet_result(
         self,

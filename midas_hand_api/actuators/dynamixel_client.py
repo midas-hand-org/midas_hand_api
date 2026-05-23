@@ -10,6 +10,10 @@ from __future__ import annotations
 import atexit
 import glob
 import logging
+import pathlib
+import shlex
+import subprocess
+import sys
 import time
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
@@ -20,6 +24,10 @@ from . import control_table as ct
 
 Number = Union[int, float]
 DXL_ALERT_BIT = 0x80
+_USB_SERIAL_SYSFS = pathlib.Path("/sys/bus/usb-serial/devices")
+_LOW_LATENCY_TIMER_MS = 1
+_ANSI_BOLD_YELLOW = "\033[1;33m"
+_ANSI_RESET = "\033[0m"
 
 
 def signed_to_unsigned(value: int, size: int) -> int:
@@ -53,6 +61,128 @@ def discover_ports() -> List[str]:
     for pattern in patterns:
         ports.extend(sorted(glob.glob(pattern)))
     return list(dict.fromkeys(ports))
+
+
+def _latency_timer_path(
+    port_name: str,
+    sysfs_root: pathlib.Path = _USB_SERIAL_SYSFS,
+) -> Optional[pathlib.Path]:
+    tty_name = pathlib.Path(port_name).resolve().name
+    path = sysfs_root / tty_name / "latency_timer"
+    return path if path.exists() else None
+
+
+def _set_low_latency_timer(
+    port_name: str,
+    target_ms: int = _LOW_LATENCY_TIMER_MS,
+    sysfs_root: pathlib.Path = _USB_SERIAL_SYSFS,
+) -> None:
+    path = _latency_timer_path(port_name, sysfs_root=sysfs_root)
+    if path is None:
+        return
+
+    command = f"echo {int(target_ms)} | sudo tee {shlex.quote(str(path))}"
+    try:
+        current_ms = int(path.read_text(encoding="utf-8").strip())
+    except OSError as exc:
+        logging.warning(
+            "Could not read Dynamixel USB serial latency timer for %s at %s: %s. "
+            "To set it manually, run: %s",
+            port_name,
+            path,
+            exc,
+            command,
+        )
+        return
+    except ValueError:
+        logging.warning(
+            "Could not parse Dynamixel USB serial latency timer for %s at %s. "
+            "To set it manually, run: %s",
+            port_name,
+            path,
+            command,
+        )
+        return
+
+    if current_ms <= target_ms:
+        return
+
+    try:
+        path.write_text(f"{int(target_ms)}\n", encoding="utf-8")
+    except OSError as exc:
+        if _try_sudo_set_latency_timer(path, target_ms):
+            logging.info(
+                "Set Dynamixel USB serial latency timer for %s to %d ms using sudo",
+                port_name,
+                target_ms,
+            )
+            return
+        logging.warning(
+            "%s Dynamixel USB serial latency timer for %s is %d ms; could not set "
+            "it to %d ms automatically: %s. For full-rate sync reads, run: %s. "
+            "For a persistent fix, add a udev rule matching this adapter and "
+            'setting ATTR{latency_timer}="%d".',
+            _highlight_warning("ACTION NEEDED:"),
+            port_name,
+            current_ms,
+            target_ms,
+            exc,
+            command,
+            target_ms,
+        )
+        return
+
+    logging.info(
+        "Set Dynamixel USB serial latency timer for %s from %d ms to %d ms",
+        port_name,
+        current_ms,
+        target_ms,
+    )
+
+
+def _try_sudo_set_latency_timer(path: pathlib.Path, target_ms: int) -> bool:
+    if not _can_prompt_for_sudo():
+        return False
+
+    logging.warning(
+        "%s Dynamixel USB serial latency timer needs sudo access. "
+        "You may be prompted for your password now.",
+        _highlight_warning("ACTION NEEDED:"),
+    )
+    try:
+        result = subprocess.run(
+            ["sudo", "tee", str(path)],
+            input=f"{int(target_ms)}\n",
+            text=True,
+            stdout=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError as exc:
+        logging.warning("Could not run sudo to set %s: %s", path, exc)
+        return False
+
+    if result.returncode != 0:
+        logging.warning(
+            "sudo command failed while setting Dynamixel USB serial latency timer "
+            "at %s",
+            path,
+        )
+        return False
+
+    try:
+        return int(path.read_text(encoding="utf-8").strip()) <= target_ms
+    except (OSError, ValueError):
+        return False
+
+
+def _can_prompt_for_sudo() -> bool:
+    return sys.stdin.isatty() and sys.stderr.isatty()
+
+
+def _highlight_warning(message: str) -> str:
+    if sys.stderr.isatty():
+        return f"{_ANSI_BOLD_YELLOW}{message}{_ANSI_RESET}"
+    return message
 
 
 def _cleanup_open_clients() -> None:
@@ -121,6 +251,7 @@ class DynamixelClient:
                 f"Could not open port '{self.port_name}'. Check the port is correct, "
                 "or omit port to auto-detect."
             )
+        _set_low_latency_timer(self.port_name)
         if not self.port_handler.setBaudRate(self.baudrate):
             self.port_handler.closePort()
             raise OSError(f"Failed to set Dynamixel baudrate {self.baudrate}")

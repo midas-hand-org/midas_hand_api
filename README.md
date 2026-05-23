@@ -34,6 +34,21 @@ paths with:
 ls /dev/serial/by-id/*
 ```
 
+### Dynamixel USB Latency
+
+On Linux, FTDI-based Dynamixel adapters such as the U2D2 can default to a
+`16 ms` USB serial latency timer. That can cap request/response control loops
+near 62.5 Hz even when the Dynamixel baudrate is much higher. For clean high-rate
+sync reads, install the persistent latency rule:
+
+```bash
+./setup_dynamixel_latency.sh
+```
+
+The script lets you select the Dynamixel adapter, writes a udev rule matching
+that adapter's USB serial number, reloads udev, and tells you if the adapter
+needs to be unplugged and replugged.
+
 ## Smoke Test
 
 ```bash

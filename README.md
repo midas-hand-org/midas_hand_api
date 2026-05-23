@@ -25,6 +25,7 @@ Give your user serial-port access:
 
 ```bash
 sudo usermod -aG dialout "$USER"
+newgrp dialout # for it to work immediately, but it will not carry over to new terminals
 ```
 
 Log out and back in after changing groups. You can also inspect stable adapter

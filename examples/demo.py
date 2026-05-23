@@ -205,7 +205,9 @@ def main() -> None:
     parser.add_argument("--viz-port", type=int, default=8050)
     args = parser.parse_args()
 
-    sensor = PaxiniHandSensor(PaxiniConfig(port=args.paxini_port))  # port=None → auto-detect
+    sensor = PaxiniHandSensor(
+        PaxiniConfig(port=args.paxini_port)
+    )  # port=None → auto-detect
     sensor.connect()
     hand: MidasHand | None = None
     try:
@@ -229,7 +231,7 @@ def main() -> None:
         run_finger_touch(hand)
         run_kapandji(hand)
 
-        time.sleep(3.0)
+        time.sleep(500.0)
 
     except KeyboardInterrupt:
         print("\nInterrupted.")

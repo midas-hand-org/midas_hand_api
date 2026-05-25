@@ -10,7 +10,7 @@ import numpy as np
 
 from .actuators import control_table as ct
 from .config import DEFAULT_CONFIG_PATH, HandConfig
-from .hand import MidasHand
+from .hand import MidasHand, _profile_acceleration_rad_s2_to_raw
 
 
 # (motor_id, joint_name, cad_offset_rad, homing_direction)
@@ -24,13 +24,13 @@ THUMB_HOMING_TABLE = [
 ]
 
 FINGER_HOMING_TABLE = [
-    (4, "Index PIP", 0.0, +1),
+    (4, "Index PIP", -0.03, +1),
     (5, "Index MCP flex", -0.05, +1),
     (6, "Index MCP abduct", 0.81, -1),
-    (7, "Middle PIP", 0.0, +1),
+    (7, "Middle PIP", -0.03, +1),
     (8, "Middle MCP flex", -0.05, +1),
-    (9, "Middle MCP abduct", 0.81, -1),
-    (10, "Ring PIP", 0.0, +1),
+    (9, "Middle MCP abduct", 0.8, -1),
+    (10, "Ring PIP", -0.03, +1),
     (11, "Ring MCP flex", -0.05, +1),
     (12, "Ring MCP abduct", -0.81, +1),
 ]
@@ -52,8 +52,8 @@ def home_motor(
     direction: int,
     cad_offset_rad: float,
     homing_velocity_rad_s: float = 1.0,
-    profile_acceleration_raw: int = 20,
-    current_threshold_ma: float = 100.0,
+    profile_acceleration_rad_s2: float = 7.5,
+    current_threshold_ma: float = 50.0,
     baseline_duration_s: float = 0.5,
     poll_interval_s: float = 0.01,
     timeout_s: float = 15.0,
@@ -73,7 +73,7 @@ def home_motor(
     _enter_velocity_homing_mode(
         hand,
         motor_id,
-        profile_acceleration_raw=profile_acceleration_raw,
+        profile_acceleration_rad_s2=profile_acceleration_rad_s2,
     )
 
     # Sample baseline current before motion so the hard-stop threshold is stable.
@@ -123,10 +123,16 @@ def home_motor(
 def _enter_velocity_homing_mode(
     hand: MidasHand,
     motor_id: int,
-    profile_acceleration_raw: int,
+    profile_acceleration_rad_s2: float,
 ) -> None:
     client = hand._client()
     client.set_torque_enabled([motor_id], False)
+    client.sync_write(
+        [motor_id],
+        [ct.DRIVE_MODE_VELOCITY_BASED_PROFILE],
+        ct.ADDR_DRIVE_MODE,
+        ct.LEN_DRIVE_MODE,
+    )
     client.sync_write(
         [motor_id],
         [ct.OPERATING_MODE_VELOCITY],
@@ -134,9 +140,12 @@ def _enter_velocity_homing_mode(
         ct.LEN_OPERATING_MODE,
     )
     client.sync_write([motor_id], [0], ct.ADDR_GOAL_VELOCITY, ct.LEN_GOAL_VELOCITY)
+    raw_acceleration = _profile_acceleration_rad_s2_to_raw(
+        profile_acceleration_rad_s2
+    )
     client.sync_write(
         [motor_id],
-        [profile_acceleration_raw],
+        [raw_acceleration],
         ct.ADDR_PROFILE_ACCELERATION,
         ct.LEN_PROFILE_ACCELERATION,
     )
@@ -447,7 +456,7 @@ def _set_single_motor_position_and_wait(
         target[motor_idx] = target_rad
         hand.set_motion_profile(
             profile_velocity_rad_s=0.5,
-            profile_acceleration_raw=200,
+            profile_acceleration_rad_s2=20.0,
             motor_ids=[motor_id],
         )
         hand.set_positions(target, clip=False)
@@ -469,7 +478,7 @@ def _set_single_motor_position_and_wait(
         try:
             hand.set_motion_profile(
                 profile_velocity_rad_s=None,
-                profile_acceleration_raw=0,
+                profile_acceleration_rad_s2=0,
                 motor_ids=[motor_id],
             )
         finally:
@@ -484,7 +493,10 @@ def _move_homed_motors_to_zero(
     print("Moving homed motors to software zero...")
     target = hand._read_motor_pos()
     target[homed_motor_indices] = 0.0
-    hand.set_motion_profile(profile_velocity_rad_s=0.5, profile_acceleration_raw=200)
+    hand.set_motion_profile(
+        profile_velocity_rad_s=0.5,
+        profile_acceleration_rad_s2=20.0,
+    )
     try:
         hand.set_positions(target, clip=False)
         reached = hand.wait_until_reached(
@@ -497,4 +509,7 @@ def _move_homed_motors_to_zero(
         if not reached:
             raise TimeoutError("Homed motors did not reach software zero within 12.00s")
     finally:
-        hand.set_motion_profile(profile_velocity_rad_s=None, profile_acceleration_raw=0)
+        hand.set_motion_profile(
+            profile_velocity_rad_s=None,
+            profile_acceleration_rad_s2=0,
+        )

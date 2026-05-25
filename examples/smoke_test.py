@@ -2,21 +2,24 @@
 
 import argparse
 
-from midas_hand_api import HandConfig, MidasHand, discover_ports
+from midas_hand_api import (
+    DEFAULT_DYNAMIXEL_BAUDRATE,
+    HandConfig,
+    MidasHand,
+    discover_ports,
+)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", default=None)
-    parser.add_argument("--baudrate", type=int, default=1_000_000)
+    parser.add_argument("--baudrate", type=int, default=DEFAULT_DYNAMIXEL_BAUDRATE)
     parser.add_argument("--motors", default="0,1,2,3,4,5,6,7,8,9,10,11,12")
     args = parser.parse_args()
 
     print(f"Candidate ports: {discover_ports()}")
     motor_ids = tuple(int(item) for item in args.motors.split(",") if item)
-    config = HandConfig.xm335_t323(
-        motor_ids=motor_ids, port=args.port, baudrate=args.baudrate
-    )
+    config = HandConfig(motor_ids=motor_ids, port=args.port, baudrate=args.baudrate)
 
     with MidasHand(config) as hand:
         print(f"Connected on: {hand.port}")

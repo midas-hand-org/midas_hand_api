@@ -11,7 +11,11 @@ import time
 
 from . import HandConfig, MidasHand
 from .actuators import control_table as ct, discover_ports
-from .config import DEFAULT_CONFIG_PATH, DEFAULT_MOTOR_IDS
+from .config import (
+    DEFAULT_CONFIG_PATH,
+    DEFAULT_DYNAMIXEL_BAUDRATE,
+    DEFAULT_MOTOR_IDS,
+)
 from .homing import home_fingers, home_hand, home_thumb
 
 
@@ -68,7 +72,7 @@ def _scan_raw(
 
 
 def _disable_unselected_motors(config: HandConfig, selected_ids: set[int]) -> None:
-    scan_config = HandConfig.xm335_t323(
+    scan_config = HandConfig(
         motor_ids=DEFAULT_MOTOR_IDS,
         port=config.port,
         baudrate=config.baudrate,
@@ -85,7 +89,7 @@ def _disable_unselected_motors(config: HandConfig, selected_ids: set[int]) -> No
         return
 
     print(f"Disabling torque on unselected connected motors: {ids_to_disable}")
-    disable_config = HandConfig.xm335_t323(
+    disable_config = HandConfig(
         motor_ids=tuple(ids_to_disable),
         port=config.port,
         baudrate=config.baudrate,
@@ -143,7 +147,9 @@ def main() -> None:
         help="Print per-ID scan errors",
     )
     args = parser.parse_args()
-    default_baudrate = args.baudrate if args.baudrate is not None else 1_000_000
+    default_baudrate = (
+        args.baudrate if args.baudrate is not None else DEFAULT_DYNAMIXEL_BAUDRATE
+    )
 
     if args.scan:
         scan_ids = _parse_id_spec(args.scan_range)
@@ -192,7 +198,7 @@ def main() -> None:
         if config_updates:
             config = dataclasses.replace(config, **config_updates)
     elif homing_requested:
-        config = HandConfig.xm335_t323(
+        config = HandConfig(
             motor_ids=requested_motor_ids, port=args.port, baudrate=default_baudrate
         )
     elif DEFAULT_CONFIG_PATH.exists():
@@ -207,7 +213,7 @@ def main() -> None:
             config_updates["baudrate"] = args.baudrate
         config = dataclasses.replace(config, **config_updates)
     else:
-        config = HandConfig.xm335_t323(
+        config = HandConfig(
             motor_ids=requested_motor_ids, port=args.port, baudrate=default_baudrate
         )
 

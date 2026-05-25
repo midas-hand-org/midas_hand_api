@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import replace
 from typing import Optional, Sequence, Tuple, Union
@@ -13,6 +14,10 @@ from .actuators import control_table as ct
 from .actuators.dynamixel_client import DynamixelClient, discover_ports
 from .config import HandConfig
 from .tactile import PaxiniHandSensor
+
+
+_CONNECT_SCAN_ATTEMPTS = 5
+_CONNECT_SCAN_DELAY_S = 0.05
 
 
 class MidasHand:
@@ -42,15 +47,30 @@ class MidasHand:
 
         last_error: Optional[Exception] = None
         checked_ports = []
+        expected_ids = set(self.motor_ids)
         for port in ports:
             if port is None:
                 continue
             try:
-                if self.port is None and not _port_has_responders(
-                    port, self.config.baudrate, self.motor_ids
-                ):
+                scan_result = _scan_port_responders(
+                    port,
+                    self.config.baudrate,
+                    self.motor_ids,
+                )
+                if not scan_result:
                     checked_ports.append(port)
-                    continue
+                    if self.port is None:
+                        continue
+                    raise OSError(
+                        "No configured motor IDs responded on "
+                        f"{port} at {self.config.baudrate} baud"
+                    )
+                logging.info(
+                    "Dynamixel scan on %s at %d baud found motor IDs %s",
+                    port,
+                    self.config.baudrate,
+                    sorted(scan_result),
+                )
                 client = DynamixelClient(
                     self.motor_ids,
                     port=port,
@@ -63,6 +83,16 @@ class MidasHand:
                 self.dxl_client = client
                 self.port = port
                 self.config = replace(self.config, port=port)
+                missing = sorted(expected_ids - set(scan_result))
+                if missing:
+                    logging.warning(
+                        "Connected to %s at %d baud, but scan only saw motor IDs "
+                        "%s; missing configured IDs %s",
+                        port,
+                        self.config.baudrate,
+                        sorted(scan_result),
+                        missing,
+                    )
                 return
             except Exception as exc:
                 last_error = exc
@@ -86,6 +116,12 @@ class MidasHand:
 
         client = self._client()
         client.set_torque_enabled(self.motor_ids, False)
+        client.sync_write(
+            self.motor_ids,
+            [ct.DRIVE_MODE_VELOCITY_BASED_PROFILE] * len(self.motor_ids),
+            ct.ADDR_DRIVE_MODE,
+            ct.LEN_DRIVE_MODE,
+        )
         client.sync_write(
             self.motor_ids,
             [self.config.operating_mode] * len(self.motor_ids),
@@ -130,14 +166,12 @@ class MidasHand:
         return self._client().read_hardware_error_status(self.motor_ids)
 
     def verify_models(self) -> dict[int, int]:
-        """Return responding motors whose model number differs from config."""
+        """Return responding motors whose model number is not XM335-T323-T."""
 
-        if self.config.expected_model_number is None:
-            return {}
         return {
             motor_id: model_number
             for motor_id, model_number in self.ping().items()
-            if model_number != self.config.expected_model_number
+            if model_number != ct.XM335_T323_MODEL_NUMBER
         }
 
     def set_positions(self, positions_rad: Sequence[float], clip: bool = True) -> None:
@@ -463,29 +497,41 @@ class MidasHand:
     def set_motion_profile(
         self,
         profile_velocity_rad_s: Optional[float] = None,
-        profile_acceleration_raw: Optional[int] = None,
+        profile_acceleration_rad_s2: Optional[float] = None,
         motor_ids: Optional[Sequence[int]] = None,
     ) -> None:
         """Set Dynamixel position-profile velocity and acceleration.
 
-        ``profile_velocity_rad_s=None`` writes ``0``, which lets the actuator use
-        its unlimited velocity profile behavior. Acceleration is passed in raw
-        Dynamixel units because the exact unit is firmware/model dependent.
+        ``None`` or ``0.0`` writes ``0`` for either profile value, disabling
+        that profile limit. ``configure()`` sets the XM335 actuators to
+        velocity-based profile mode, where acceleration is written in units of
+        214.577 rev/min^2.
         """
 
         ids = list(motor_ids) if motor_ids is not None else self.motor_ids
         client = self._client()
-        if profile_acceleration_raw is not None:
-            client.sync_write(
-                ids,
-                [int(profile_acceleration_raw)] * len(ids),
-                ct.ADDR_PROFILE_ACCELERATION,
-                ct.LEN_PROFILE_ACCELERATION,
-            )
-        if profile_velocity_rad_s is not None:
-            raw_vel = max(1, int(profile_velocity_rad_s / client.vel_scale))
+        if profile_acceleration_rad_s2 is None:
+            raw_accel = 0
         else:
+            if profile_acceleration_rad_s2 < 0:
+                raise ValueError("profile_acceleration_rad_s2 must be non-negative")
+            raw_accel = _profile_acceleration_rad_s2_to_raw(
+                profile_acceleration_rad_s2
+            )
+        client.sync_write(
+            ids,
+            [raw_accel] * len(ids),
+            ct.ADDR_PROFILE_ACCELERATION,
+            ct.LEN_PROFILE_ACCELERATION,
+        )
+        if profile_velocity_rad_s is None:
             raw_vel = 0
+        else:
+            if profile_velocity_rad_s < 0:
+                raise ValueError("profile_velocity_rad_s must be non-negative")
+            raw_vel = 0 if profile_velocity_rad_s == 0 else max(
+                1, int(profile_velocity_rad_s / client.vel_scale)
+            )
         client.sync_write(
             ids,
             [raw_vel] * len(ids),
@@ -550,20 +596,52 @@ def scale(value, lower, upper):
     return 0.5 * (np.asarray(value, dtype=np.float64) + 1.0) * (upper - lower) + lower
 
 
-def _port_has_responders(port: str, baudrate: int, motor_ids: Sequence[int]) -> bool:
+def _profile_acceleration_rad_s2_to_raw(acceleration_rad_s2: float) -> int:
+    if acceleration_rad_s2 < 0:
+        raise ValueError("profile_acceleration_rad_s2 must be non-negative")
+    if acceleration_rad_s2 == 0:
+        return 0
+    raw = int(
+        round(acceleration_rad_s2 / ct.XM335_T323_PROFILE_ACCELERATION_UNIT_RAD_S2)
+    )
+    return max(1, raw)
+
+
+def _scan_port_responders(
+    port: str,
+    baudrate: int,
+    motor_ids: Sequence[int],
+    attempts: int = _CONNECT_SCAN_ATTEMPTS,
+    delay_s: float = _CONNECT_SCAN_DELAY_S,
+) -> dict[int, int]:
     import dynamixel_sdk
 
     port_handler = dynamixel_sdk.PortHandler(port)
     packet_handler = dynamixel_sdk.PacketHandler(ct.PROTOCOL_VERSION)
     if not port_handler.openPort():
-        return False
+        return {}
     try:
         if not port_handler.setBaudRate(int(baudrate)):
-            return False
-        for motor_id in motor_ids:
-            _, comm_result, _ = packet_handler.ping(port_handler, int(motor_id))
-            if comm_result == dynamixel_sdk.COMM_SUCCESS:
-                return True
-        return False
+            return {}
+
+        responders: dict[int, int] = {}
+        requested_ids = [int(motor_id) for motor_id in motor_ids]
+        attempt_count = max(1, int(attempts))
+        for attempt in range(attempt_count):
+            for motor_id in requested_ids:
+                if motor_id in responders:
+                    continue
+                model, comm_result, _ = packet_handler.ping(port_handler, motor_id)
+                if comm_result == dynamixel_sdk.COMM_SUCCESS:
+                    responders[motor_id] = int(model)
+            if len(responders) == len(requested_ids):
+                break
+            if delay_s > 0 and attempt < attempt_count - 1:
+                time.sleep(delay_s)
+        return responders
     finally:
         port_handler.closePort()
+
+
+def _port_has_responders(port: str, baudrate: int, motor_ids: Sequence[int]) -> bool:
+    return bool(_scan_port_responders(port, baudrate, motor_ids))

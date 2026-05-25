@@ -44,7 +44,7 @@ THUMB_TARGETS_RAD = {
 def load_config() -> HandConfig:
     if DEFAULT_CONFIG_PATH.exists():
         return HandConfig.load(DEFAULT_CONFIG_PATH)
-    return HandConfig.xm335_t323()
+    return HandConfig()
 
 
 def set_motor_targets(
@@ -82,6 +82,8 @@ def run_finger_sequence(
     if previous_finger_name is not None:
         previous_finger_ids = FINGER_IDS[previous_finger_name]
         set_motor_targets(hand, target, previous_finger_ids, np.zeros(3))
+        hand.set_positions(target, clip=True)
+        time.sleep(0.1)
 
     set_motor_targets(hand, target, finger_ids, FINGER_TARGET_RAD)
     for waypoint_idx, thumb_target in enumerate(THUMB_TARGETS_RAD[finger_name]):
@@ -112,8 +114,8 @@ def main() -> None:
         hand.enable_torque()
 
         hand.set_motion_profile(
-            profile_velocity_rad_s=1.5,
-            profile_acceleration_raw=300,
+            profile_velocity_rad_s=3.0,
+            profile_acceleration_rad_s2=20.0,
             motor_ids=hand.motor_ids,
         )
 

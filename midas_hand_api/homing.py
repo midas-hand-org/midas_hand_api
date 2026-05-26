@@ -53,7 +53,7 @@ def home_motor(
     cad_offset_rad: float,
     homing_velocity_rad_s: float = 1.0,
     profile_acceleration_rad_s2: float = 7.5,
-    current_threshold_ma: float = 50.0,
+    current_threshold_ma: float = 130.0,
     baseline_duration_s: float = 0.5,
     poll_interval_s: float = 0.01,
     timeout_s: float = 15.0,

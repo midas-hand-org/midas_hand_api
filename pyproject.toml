@@ -23,6 +23,7 @@ qt = [
 
 [project.scripts]
 midas-hand = "midas_hand_api.__main__:main"
+midas-paxini = "midas_hand_api.tactile.paxini_tactile_qt:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

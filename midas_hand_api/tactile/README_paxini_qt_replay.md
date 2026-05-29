@@ -4,6 +4,37 @@ The tactile tools now live inside `midas_hand_api/tactile/`. The active tool is
 `paxini_tactile_qt.py`, which combines live streaming, CSV recording, and CSV
 replay in one local PyQtGraph app.
 
+### Hardware Reference
+
+The driver supports the Paxini GEN3 high-speed board
+`PX6AX-GEN3-DP-S2015-Elite` using the `AA56` auto-push stream.
+
+| Finger | Force points | Board device address |
+|--------|--------------|----------------------|
+| thumb | 127 | 1 |
+| index | 52 | 2 |
+| middle | 52 | 3 |
+| ring | 52 | 4 |
+
+The board uses USB serial at `921600` baud. If no port is passed, the driver
+auto-detects a board whose USB description or manufacturer contains `paxini`.
+Explicit ports such as `/dev/ttyACM0` also work.
+
+`read_latest()` returns `dict[str, ndarray]`; each array has shape `(N, 3)` with
+columns `[Fx, Fy, Fz]` in Newtons. The board can stream at roughly `83.3 Hz`;
+`publish_rate_hz` controls how often the API exposes the latest value.
+
+Standalone API usage:
+
+```python
+from midas_hand_api import PaxiniConfig, PaxiniHandSensor
+
+with PaxiniHandSensor(PaxiniConfig()) as sensor:
+    data = sensor.read_latest()
+    print(data["thumb"].shape)   # (127, 3)
+    print(data["index"].shape)   # (52, 3)
+```
+
 ### Install
 
 From the `midas_hand_api` directory:

@@ -1,16 +1,15 @@
 # Midas Hand API
 
 Python API for the Midas 13-motor Dynamixel hand (`XM335-T323-T` actuators)
-with Paxini GEN3 tactile sensing. Provides a low-level Dynamixel client, a
-high-level hand object, motor homing/calibration, and a full tactile sensor
-driver.
+with Paxini tactile support. Provides a low-level Dynamixel client, a high-level
+hand object, motor homing/calibration utilities, and local Qt tactile tools.
 
 ```text
 midas_hand_api/
   actuators/   # Dynamixel client and control-table constants
-  tactile/     # Paxini GEN3 high-speed board driver (AA56 auto-push stream)
-  hand.py      # MidasHand — unified interface for motors and tactile
+  hand.py      # MidasHand high-level motor interface
   homing.py    # motor homing and host-side calibration persistence
+  tactile/     # Paxini driver, Qt visualizer, recording, and replay
 ```
 
 ## Setup
@@ -60,6 +59,41 @@ By default, the smoke test uses motor IDs `0` through `12`. If you only want to
 test a subset, pass `--motors`, for example `--motors 0,1,2,3`. Do not leave
 Dynamixel Wizard open while running the API because it keeps the serial port
 busy.
+
+## Paxini Tactile Qt Tool
+
+Paxini tactile support now lives under `midas_hand_api/tactile/`. The main Qt
+tool combines live streaming, CSV recording, and CSV replay in one local app.
+
+Install the optional Qt dependencies:
+
+```bash
+python -m pip install -e ".[qt]"
+```
+
+Run the tactile app from the `midas_hand_api` directory:
+
+```bash
+python -m midas_hand_api.tactile.paxini_tactile_qt
+```
+
+After installing the package, you can also use:
+
+```bash
+midas-paxini
+```
+
+Useful options:
+
+```bash
+python -m midas_hand_api.tactile.paxini_tactile_qt --port /dev/ttyACM0
+python -m midas_hand_api.tactile.paxini_tactile_qt --csv paxini_recording.csv
+python -m midas_hand_api.tactile.paxini_tactile_qt --replay-only --csv paxini_recording.csv
+```
+
+The old example-level web and split tactile scripts have been removed. See
+`midas_hand_api/tactile/README_paxini_qt_replay.md` for the current recording
+and replay workflow.
 
 ## First-Time Homing
 
@@ -154,98 +188,6 @@ its recommended to disable motion profiling with `profile_velocity_rad_s=None` a
 shaping; motion is still subject to current limits, gains, update rate, and
 contact.
 
-## Tactile Sensors
-
-The `midas_hand_api.tactile` module drives the Paxini GEN3 high-speed board
-(`PX6AX-GEN3-DP-S2015-Elite`) over USB serial using the AA56 auto-push stream.
-
-### Hardware layout
-
-| Finger | Force points | Board device address |
-|--------|-------------|----------------------|
-| thumb  | 127         | 1                    |
-| index  | 52          | 2                    |
-| middle | 52          | 3                    |
-| ring   | 52          | 4                    |
-
-The Paxini board connects via USB (typically `/dev/ttyUSB1`) at 921 600 baud.
-Make sure your user is in the `dialout` group (see **Setup** above).
-
-### Integrated with MidasHand
-
-```python
-from midas_hand_api import HandConfig, MidasHand, PaxiniConfig, PaxiniHandSensor
-
-hand_config = HandConfig.load()
-tactile = PaxiniHandSensor(PaxiniConfig(port="/dev/ttyUSB1"))
-
-with MidasHand(hand_config, tactile_sensor=tactile) as hand:
-    hand.configure(enable_torque=True)
-    data = hand.read_tactile()       # dict[str, ndarray (N, 3)]
-    fz = hand.read_tactile_fz()    # dict[str, ndarray (N,)]
-```
-
-### Standalone usage
-
-```python
-from midas_hand_api import PaxiniConfig, PaxiniHandSensor
-
-config = PaxiniConfig(port="/dev/ttyUSB1")
-
-with PaxiniHandSensor(config) as sensor:
-    # read_latest() → dict[finger_name, ndarray shape (N, 3)]
-    # columns are [Fx, Fy, Fz] in Newtons
-    data = sensor.read_latest()
-    print(data["thumb"].shape)   # (127, 3)
-    print(data["index"].shape)   # (52, 3)
-
-    # Single-axis convenience accessors → dict[finger_name, ndarray shape (N,)]
-    fz = sensor.read_tactile_fz()
-    print(fz["index"])
-```
-
-`connect()` raises `RuntimeError` immediately if any finger listed in
-`PaxiniConfig.fingers` is not physically connected to the board. By default all
-four fingers are expected. To use a subset:
-
-```python
-config = PaxiniConfig(port="/dev/ttyUSB1", fingers=["index", "middle"])
-```
-
-### Key config options
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `port` | *(required)* | Serial port, e.g. `"/dev/ttyUSB1"` |
-| `fingers` | all four | Ordered list of fingers to read |
-| `publish_rate_hz` | `60.0` | Rate at which `read_latest()` delivers a new value |
-| `median_window` | `3` | Rolling median window size; set `1` to disable |
-
-The reader thread consumes frames as fast as the board delivers them
-(hardware ceiling ~83.3 Hz). `publish_rate_hz` caps delivery independently.
-
-### Qt live view, recording, and replay
-
-Install the local Qt tools:
-
-```bash
-python -m pip install -e ".[qt]"
-```
-
-Live tactile visualization:
-
-```bash
-python examples/read_paxini_tactile.py
-python examples/read_paxini_tactile.py --qt-update-hz 30 --no-arrows
-```
-
-Record and replay a CSV:
-
-```bash
-python examples/record_paxini_tactile.py --csv paxini_recording.csv
-python examples/replay_paxini_recording_qt.py --csv paxini_recording.csv --replay-rate-hz 30
-```
-
 ## XM335-T323-T Defaults
 
 - Protocol: 2.0
@@ -270,7 +212,7 @@ modes are:
 | `1` | Velocity control | Homing moves, continuous sweeps, spin-at-speed tests, and debugging motion direction or bus communication. This is not the normal grasping mode. |
 | `3` | Position control | Standard single-turn joint position mode. Use this for repeatable pose playback, calibration checks, and precise scripted motions when you want the actuator to prioritize tracking the commanded position. |
 | `4` | Extended position control | Multi-turn position commands for mechanisms that intentionally rotate beyond one revolution. The Midas hand joints normally should not need this. |
-| `5` | Current-based position control | Default. Still commands position, but also uses `Goal Current(102)` as the current/torque limit. Use this for robot learning, teleoperation, tactile interaction, and grasping because the hand can yield under contact instead of forcing the exact target as rigidly when the current limit is reached. |
+| `5` | Current-based position control | Default. Still commands position, but also uses `Goal Current(102)` as the current/torque limit. Use this for robot learning, teleoperation, contact-rich interaction, and grasping because the hand can yield under contact instead of forcing the exact target as rigidly when the current limit is reached. |
 | `16` | PWM control | Raw voltage/PWM-style experiments and actuator characterization. This bypasses the normal current/position abstractions and should only be used for low-level testing. |
 
 `MidasHand.configure()` applies the default current-based position mode (`5`).

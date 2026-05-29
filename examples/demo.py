@@ -6,8 +6,8 @@ Usage::
     python examples/demo.py --hand-port /dev/ttyUSB0
     python examples/demo.py --paxini-port /dev/ttyACM0
 
-For local Qt tactile visualization, run ``examples/read_paxini_tactile.py`` in
-a separate terminal.
+For local Qt tactile visualization, run
+``python -m midas_hand_api.tactile.paxini_tactile_qt`` in a separate terminal.
 """
 
 import argparse

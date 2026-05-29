@@ -2,8 +2,8 @@
 
 Moves each finger to the Kapandji target position while placing the thumb at
 the corresponding recorded touch waypoint. A Paxini tactile sensor is required;
-force data is read through ``MidasHand.read_tactile()`` and visualized live in a
-browser tab by default.
+force data is read through ``MidasHand.read_tactile()`` and summarized in the
+terminal.
 
 Usage::
 
@@ -11,7 +11,8 @@ Usage::
     python examples/finger_touch.py --hand-port /dev/ttyUSB0
     python examples/finger_touch.py --paxini-port /dev/ttyACM0
 
-Use ``--no-viz`` to skip the browser visualizer (e.g. no display available).
+For local Qt tactile visualization, run ``examples/read_paxini_tactile.py`` in
+a separate terminal.
 """
 
 import argparse
@@ -21,7 +22,6 @@ import numpy as np
 
 from midas_hand_api import DEFAULT_CONFIG_PATH, HandConfig, MidasHand
 from midas_hand_api.tactile import PaxiniConfig, PaxiniHandSensor
-from midas_hand_api.tactile.paxini_visualizer import PaxiniVisualizer
 
 
 THUMB_IDS = (0, 1, 2, 3)
@@ -133,8 +133,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--paxini-port", default=None, help="Paxini serial port (auto-detected if omitted)")
     parser.add_argument("--hand-port", default=None, help="Serial port for Dynamixel hand (auto-detected if omitted)")
-    parser.add_argument("--no-viz", action="store_true", help="Skip the browser visualizer")
-    parser.add_argument("--viz-port", type=int, default=8050, help="Dash server port (default 8050)")
     args = parser.parse_args()
 
     sensor = PaxiniHandSensor(PaxiniConfig(port=args.paxini_port))  # port=None → auto-detect
@@ -144,9 +142,6 @@ def main() -> None:
         hand = MidasHand(load_config(args.hand_port), tactile_sensor=sensor)
         print(f"Hand connected on {hand.port}")
         print(f"Paxini connected on {sensor.port}")
-
-        if not args.no_viz:
-            PaxiniVisualizer(hand.read_tactile).start_background(port=args.viz_port)
 
         hand.configure(enable_torque=False)
 

@@ -224,6 +224,28 @@ config = PaxiniConfig(port="/dev/ttyUSB1", fingers=["index", "middle"])
 The reader thread consumes frames as fast as the board delivers them
 (hardware ceiling ~83.3 Hz). `publish_rate_hz` caps delivery independently.
 
+### Qt live view, recording, and replay
+
+Install the local Qt tools:
+
+```bash
+python -m pip install -e ".[qt]"
+```
+
+Live tactile visualization:
+
+```bash
+python examples/read_paxini_tactile.py
+python examples/read_paxini_tactile.py --qt-update-hz 30 --no-arrows
+```
+
+Record and replay a CSV:
+
+```bash
+python examples/record_paxini_tactile.py --csv paxini_recording.csv
+python examples/replay_paxini_recording_qt.py --csv paxini_recording.csv --replay-rate-hz 30
+```
+
 ## XM335-T323-T Defaults
 
 - Protocol: 2.0

@@ -115,6 +115,7 @@ config = PaxiniConfig(
     discard_startup_frames=5,
     median_window=3,
     response_timeout_s=1.0,
+    startup_attempts=3,
     serial_settle_s=0.75,
     dtr=False,
     rts=True,
@@ -131,6 +132,7 @@ config = PaxiniConfig(
 | `discard_startup_frames` | 5 | Frames thrown away right after enabling stream. Prevents stale data. |
 | `median_window` | 3 | Rolling median over this many consecutive frames. Set to 1 to disable. |
 | `response_timeout_s` | 1.0 | Max seconds to wait for one AA56 frame before raising `TimeoutError`. |
+| `startup_attempts` | 3 | Retries the auto-push enable sequence if the first frames do not arrive. |
 | `serial_settle_s` | 0.75 | Seconds to wait after opening the port before any writes. |
 | `dtr` | False | Leave False. Setting DTR True on some boards disables output. |
 | `rts` | True | Leave True. Required by the Paxini board. |
@@ -223,49 +225,54 @@ fz   = hand.read_tactile_fz()
 
 ---
 
-## `PaxiniVisualizer`
+## `PaxiniQtVisualizer`
 
-Live browser-based visualization of Paxini force data using Dash + Plotly. Completely decoupled from `PaxiniHandSensor` — accepts any callable that returns `dict[str, ndarray (N, 3)]`.
+Local Qt visualization of Paxini force data using `pyqtgraph`. It accepts any
+callable that returns `dict[str, ndarray (N, 3)]`, so it can display
+`PaxiniHandSensor.read_latest` directly.
 
 ### Install
 
 ```bash
-pip install dash plotly
-# or
-pip install -e ".[viz]"
+pip install -e ".[qt]"
 ```
 
 ### Usage
 
 ```python
-from midas_hand_api.tactile import PaxiniConfig, PaxiniHandSensor
-from midas_hand_api.tactile.paxini_visualizer import PaxiniVisualizer
+from midas_hand_api.tactile import PaxiniConfig, PaxiniHandSensor, PaxiniQtVisualizer
 
 sensor = PaxiniHandSensor(PaxiniConfig(port="/dev/ttyACM0"))
 sensor.connect()
 
-# Blocking — open http://127.0.0.1:8050 in a browser
-PaxiniVisualizer(sensor.read_latest).run()
+PaxiniQtVisualizer(sensor.read_latest, update_hz=30).run()
+```
 
-# Non-blocking — start in background, continue with motion code
-viz = PaxiniVisualizer(sensor.read_latest)
-viz.start_background()    # prints URL, returns immediately
+The simplest command-line entry point is:
+
+```bash
+python examples/read_paxini_tactile.py
+python examples/read_paxini_tactile.py --qt-update-hz 30
+python examples/read_paxini_tactile.py --no-arrows
 ```
 
 ### Constructor
 
 ```python
-PaxiniVisualizer(
+PaxiniQtVisualizer(
     get_data,                       # Callable[[], dict[str, ndarray (N, 3)]]
     *,
     coords=None,                    # dict[str, ndarray (N, 3)] in mm — auto-detected if None
-    update_ms=100,                  # browser refresh interval (10 Hz default)
+    update_hz=30.0,                 # Qt redraw rate
     component="Fz",                 # initial force component shown
-    history_len=300,                # rolling history depth
+    history_len=600,                # rolling history depth
+    history_window_s=10.0,          # seconds shown in history plots
+    show_arrows=True,
 )
 ```
 
-`get_data` is called on every browser tick. Passing `sensor.read_latest` directly works because `read_latest` is a bound method — no lambda needed.
+`get_data` is called on every Qt timer tick. Passing `sensor.read_latest`
+directly works because `read_latest` is a bound method — no lambda needed.
 
 `coords` are the physical X/Y/Z positions of each force point on the fingertip pad in millimetres. If omitted, auto-detected by matching the array's row count against the bundled CSV files:
 
@@ -274,21 +281,15 @@ PaxiniVisualizer(
 | 127 | `paxini_fingertip_26mm_127pts.csv` | Thumb (26 mm) |
 | 52 | `paxini_fingertip_15mm_52pts.csv` | Index/middle/ring (15 mm) |
 
-### What the Browser Shows
+### What The Qt UI Shows
 
-**One scatter plot per finger** — each force point rendered at its physical X/Y coordinate on the fingertip. Points are colored by the selected component (Fz / |F| / Fx / Fy) on a Viridis colorscale. The aspect ratio is 1:1 so the pad geometry is not distorted. Hover over any point to see Fx, Fy, Fz, and |F| in Newtons.
+**One tactile map per finger** — each force point rendered at its physical X/Y coordinate on the fingertip. Points are blue at zero force and trend red as the selected force component increases. The aspect ratio is 1:1 so the pad geometry is not distorted.
 
-**Rolling force history** — the bottom panel plots Σ|F| (sum of force magnitudes across all points on each finger) over time. One line per finger. x-axis is seconds since first sample. Useful for spotting the moment of contact and comparing relative loading across fingers.
+**Regional arrows** — summed force arrows are drawn over small regions of the tactile map, not every point, so force direction is visible without clutter.
 
-**Component dropdown** — switch between Fz, |F|, Fx, Fy without reloading. The colorbar scale adjusts to the current data range.
+**Split histories** — the left history plot shows ΣFx/ΣFy/ΣFz for one selected finger. The right history plot shows Σ|F| for all fingers.
 
-### How It Works Internally
-
-1. `_build_app()` calls `_first_sample(get_data)` which polls with up to 30 retries (3 s timeout) until a valid sample arrives. This is needed because Dash requires all callback output component IDs to exist in the initial layout — so finger names must be known before the layout is built.
-2. The Dash layout is constructed with fixed `id="digit-{name}"` for each finger, plus `id="history"` and `id="status"`.
-3. A single `@app.callback` fires every `update_ms` ms, calls `get_data()`, appends to the history buffer, and returns updated figures for all outputs.
-4. `run()` calls `app.run(debug=False)` directly (blocks).
-5. `start_background()` wraps the same call in a daemon `threading.Thread` — the thread dies automatically when the main process exits.
+**Controls** — choose the map intensity (`|F|`, `|Fz|`, `|Fx|`, `|Fy|`), choose the component-history finger, and freeze/unfreeze the display.
 
 ### Passing Custom Coordinates
 
@@ -301,10 +302,11 @@ my_coords = {
     "thumb": np.loadtxt("my_thumb_coords.csv", delimiter=",", skiprows=1),  # (127, 3)
     "index": np.loadtxt("my_index_coords.csv", delimiter=",", skiprows=1),  # (52, 3)
 }
-viz = PaxiniVisualizer(sensor.read_latest, coords=my_coords)
+viz = PaxiniQtVisualizer(sensor.read_latest, coords=my_coords)
 ```
 
-Fingers with no entry in `coords` will show "No coordinates" until one is provided.
+Fingers with no entry in `coords` will leave the tactile map empty until
+coordinates are provided.
 
 ---
 
@@ -315,15 +317,12 @@ Fingers with no entry in `coords` will show "No coordinates" until one is provid
 - Check DTR is `False` and RTS is `True` (most common issue).
 - Verify baud rate is 921600 — the board does not auto-negotiate.
 - Try increasing `serial_settle_s` to 1.5 if the CDC driver is slow to enumerate.
+- Try `response_timeout_s=3.0`, `startup_attempts=5`, or `discard_startup_frames=0` while debugging startup.
 - Run `python -m serial.tools.miniterm /dev/ttyACM0 921600` and press enter — you should see binary garbage if the board is alive.
 
 ### `RuntimeError: Finger validation failed`
 
 A configured finger is not physically plugged into the board. The error names the specific finger. Either connect the missing finger or remove it from `PaxiniConfig.fingers`.
-
-### Visualizer `KeyError: Callback function not found`
-
-The browser has a cached layout from a previous session with different finger names. Hard-refresh the browser tab (`Ctrl+Shift+R`) or clear the browser cache.
 
 ### Fz values look wrong / always zero
 

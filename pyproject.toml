@@ -16,9 +16,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-viz = [
-    "dash>=2.17",
-    "plotly>=5.22",
+qt = [
+    "pyqtgraph>=0.13.7",
+    "PyQt6>=6.6",
 ]
 
 [project.scripts]

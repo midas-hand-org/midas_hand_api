@@ -2,21 +2,19 @@
 
 This example connects only to the Paxini tactile board; it does not require a
 Dynamixel hand connection. It reads the high-speed AA56 stream through
-``PaxiniHandSensor`` and, by default, opens the shared ``PaxiniVisualizer`` with
+``PaxiniHandSensor`` and, by default, opens a local pyqtgraph visualizer with
 the dark tactile maps, regional force arrows, and split history plots.
 
 Usage::
 
     python examples/read_paxini_tactile.py
     python examples/read_paxini_tactile.py --port /dev/ttyACM0
-    python examples/read_paxini_tactile.py --fingers thumb,index --viz-port 8051
+    python examples/read_paxini_tactile.py --fingers thumb,index --qt-update-hz 30
     python examples/read_paxini_tactile.py --no-viz --print-rate-hz 5
-    python examples/read_paxini_tactile.py --update-ms 100 --history-update-ms 300
-    python examples/read_paxini_tactile.py --recording-csv data/paxini_recording.csv
 
 Install visualization dependencies first if needed::
 
-    python -m pip install -e ".[viz]"
+    python -m pip install -e ".[qt]"
 """
 
 from __future__ import annotations
@@ -26,8 +24,7 @@ import time
 
 import numpy as np
 
-from midas_hand_api.tactile import PaxiniConfig, PaxiniHandSensor
-from midas_hand_api.tactile.paxini_visualizer import PaxiniVisualizer
+from midas_hand_api.tactile import PaxiniConfig, PaxiniHandSensor, PaxiniQtVisualizer
 
 
 DEFAULT_FINGERS = ("thumb", "index", "middle", "ring")
@@ -130,20 +127,29 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--serial-settle", type=float, default=0.75)
     parser.add_argument("--response-timeout", type=float, default=1.0)
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--viz-port", type=int, default=8050)
-    parser.add_argument("--update-ms", type=int, default=100)
     parser.add_argument(
-        "--history-update-ms",
+        "--startup-attempts",
         type=int,
-        default=300,
-        help="Browser refresh interval for the two history plots.",
+        default=3,
+        help="Retry count for the Paxini auto-push enable sequence.",
+    )
+    parser.add_argument(
+        "--qt-update-hz",
+        type=float,
+        default=30.0,
+        help="Local pyqtgraph redraw rate. 30 Hz is usually smooth without overloading the UI.",
     )
     parser.add_argument(
         "--history-len",
         type=int,
-        default=300,
+        default=600,
         help="Number of summarized samples kept in the visual history.",
+    )
+    parser.add_argument(
+        "--history-window-s",
+        type=float,
+        default=10.0,
+        help="Seconds of live history visible in the local Qt history plots.",
     )
     parser.add_argument(
         "--component",
@@ -168,12 +174,7 @@ def parse_args() -> argparse.Namespace:
         default=0.25,
         help="Minimum regional summed force in Newtons before drawing an arrow.",
     )
-    parser.add_argument(
-        "--recording-csv",
-        default="paxini_recording.csv",
-        help="CSV file overwritten by the visualizer Stop button after recording.",
-    )
-    parser.add_argument("--no-viz", action="store_true", help="Do not start Dash visualizer.")
+    parser.add_argument("--no-viz", action="store_true", help="Do not start the Qt visualizer.")
     parser.add_argument(
         "--no-print",
         action="store_true",
@@ -206,6 +207,7 @@ def main() -> None:
         discard_startup_frames=args.discard_startup_frames,
         median_window=args.median_window,
         response_timeout_s=args.response_timeout,
+        startup_attempts=args.startup_attempts,
         serial_settle_s=args.serial_settle,
         dtr=args.dtr,
         rts=args.rts,
@@ -218,17 +220,20 @@ def main() -> None:
         print(f"Reading fingers: {', '.join(args.fingers)}")
 
         if not args.no_viz:
-            PaxiniVisualizer(
+            print(f"Starting local pyqtgraph visualizer at {args.qt_update_hz:.1f} Hz.")
+            PaxiniQtVisualizer(
                 sensor.read_latest,
-                update_ms=args.update_ms,
+                update_hz=args.qt_update_hz,
                 component=args.component,
                 history_len=args.history_len,
-                history_update_ms=args.history_update_ms,
+                history_window_s=args.history_window_s,
                 show_arrows=not args.no_arrows,
                 arrow_region_size=args.arrow_region_size,
                 arrow_min_force_n=args.arrow_min_force,
-                recording_csv=args.recording_csv,
-            ).start_background(host=args.host, port=args.viz_port)
+                duration_s=args.duration,
+            ).run()
+
+        print("Visualizer disabled; printing terminal summaries only.")
 
         print_interval_s = 1.0 / max(args.print_rate_hz, 1e-6)
         next_print_s = 0.0

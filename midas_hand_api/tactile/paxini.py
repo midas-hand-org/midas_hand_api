@@ -62,6 +62,7 @@ _DEFAULT_DISCARD_STARTUP_FRAMES = 5
 _DEFAULT_MEDIAN_WINDOW = 3
 _DEFAULT_SERIAL_SETTLE_S = 0.75
 _DEFAULT_RESPONSE_TIMEOUT_S = 1.0
+_DEFAULT_STARTUP_ATTEMPTS = 3
 
 _PAXINI_ID_STRING = "paxini"
 
@@ -144,6 +145,8 @@ class PaxiniConfig:
         median_window: Rolling median window over consecutive frames for noise
             reduction. Set 1 to disable.
         response_timeout_s: Seconds to wait for one complete AA56 frame.
+        startup_attempts: Number of times to retry the auto-push enable
+            sequence if the first AA56 frames do not arrive.
         serial_settle_s: Seconds to wait after opening the port before writing.
         dtr: USB serial DTR line state. False is the Paxini board default.
         rts: USB serial RTS line state. True is the Paxini board default.
@@ -158,6 +161,7 @@ class PaxiniConfig:
     discard_startup_frames: int = _DEFAULT_DISCARD_STARTUP_FRAMES
     median_window: int = _DEFAULT_MEDIAN_WINDOW
     response_timeout_s: float = _DEFAULT_RESPONSE_TIMEOUT_S
+    startup_attempts: int = _DEFAULT_STARTUP_ATTEMPTS
     serial_settle_s: float = _DEFAULT_SERIAL_SETTLE_S
     dtr: bool = False
     rts: bool = True
@@ -505,30 +509,83 @@ class PaxiniHandSensor:
             self.config.rts,
         )
 
-        # Stop any running stream, set data type, then re-enable.
-        # Use no-ack writes to avoid CDC driver timing issues with ACK responses.
-        ser.write(_DISABLE_AUTO_PUSH)
-        time.sleep(0.2)
-        _drain(ser)
-        _write_no_ack(ser, _ADDR_DATA_TYPE, bytes([_DATA_TYPE_RESULTANT_AND_DISTRIBUTED]))
-        time.sleep(0.05)
-        _drain(ser)
-        ser.reset_input_buffer()
-        self._buffer.clear()
+        # Stop any running stream, set data type, then re-enable. Some Paxini
+        # CDC adapters occasionally miss the first enable after a fresh open,
+        # so retry the exact startup sequence before giving up.
+        frame: bytes | None = None
+        last_timeout: TimeoutError | None = None
+        startup_attempts = max(1, self.config.startup_attempts)
+        for attempt in range(1, startup_attempts + 1):
+            if attempt > 1:
+                print(
+                    f"Retrying Paxini auto-push startup "
+                    f"({attempt}/{startup_attempts})..."
+                )
+            try:
+                # Use no-ack writes to avoid CDC driver timing issues with ACK responses.
+                ser.write(_DISABLE_AUTO_PUSH)
+                ser.flush()
+                time.sleep(0.2)
+                _drain(ser)
+                _write_no_ack(
+                    ser,
+                    _ADDR_DATA_TYPE,
+                    bytes([_DATA_TYPE_RESULTANT_AND_DISTRIBUTED]),
+                )
+                ser.flush()
+                time.sleep(0.05)
+                _drain(ser)
+                ser.reset_input_buffer()
+                self._buffer.clear()
 
-        ser.write(_ENABLE_AUTO_PUSH)
-        logger.debug("TX enable auto-push")
+                bytes_sent = ser.write(_ENABLE_AUTO_PUSH)
+                ser.flush()
+                if bytes_sent != len(_ENABLE_AUTO_PUSH):
+                    raise serial.SerialException(
+                        f"Serial write incomplete: sent "
+                        f"{bytes_sent}/{len(_ENABLE_AUTO_PUSH)} bytes"
+                    )
+                logger.debug("TX enable auto-push")
 
-        # Discard transient startup frames before treating data as valid.
-        for _ in range(max(0, self.config.discard_startup_frames)):
-            _read_frame(ser, self.config.response_timeout_s, self._buffer)
-        if self.config.discard_startup_frames > 0:
-            logger.info("Discarded %d startup frames", self.config.discard_startup_frames)
+                # Discard transient startup frames before treating data as valid.
+                for _ in range(max(0, self.config.discard_startup_frames)):
+                    _read_frame(ser, self.config.response_timeout_s, self._buffer)
+                if self.config.discard_startup_frames > 0:
+                    logger.info(
+                        "Discarded %d startup frames",
+                        self.config.discard_startup_frames,
+                    )
 
-        # Validate: parse one complete frame to confirm every configured finger
-        # is present. If a finger is missing the payload will be too short and
-        # _parse_digits raises a clear per-finger error.
-        frame = _read_frame(ser, self.config.response_timeout_s, self._buffer)
+                # Validate: parse one complete frame to confirm every configured finger
+                # is present. If a finger is missing the payload will be too short and
+                # _parse_digits raises a clear per-finger error.
+                frame = _read_frame(ser, self.config.response_timeout_s, self._buffer)
+                break
+            except TimeoutError as exc:
+                last_timeout = exc
+                logger.warning(
+                    "Paxini auto-push startup attempt %d/%d timed out: %s",
+                    attempt,
+                    startup_attempts,
+                    exc,
+                )
+                try:
+                    ser.write(_DISABLE_AUTO_PUSH)
+                    ser.flush()
+                except (OSError, serial.SerialException):
+                    pass
+                time.sleep(0.2)
+
+        if frame is None:
+            ser.close()
+            raise TimeoutError(
+                "No valid Paxini AA56 auto-push frame was received after "
+                f"{startup_attempts} startup attempts. Try rerunning, or try "
+                "--response-timeout 3 --discard-startup-frames 0. If the old "
+                "high-speed script still works, run this script with the same "
+                "--port/--dtr/--rts settings."
+            ) from last_timeout
+
         try:
             _parse_digits(
                 _parse_frame_payload(frame),

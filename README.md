@@ -17,7 +17,7 @@ midas_hand_api/
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements.txt
+pip install .          # or pip install -e . for a dev/editable install
 ```
 
 Give your user serial-port access:
@@ -53,74 +53,13 @@ needs to be unplugged and replugged.
 ```bash
 source .venv/bin/activate
 python examples/smoke_test.py
+python -m midas_hand_api --help  # see options for motor scan, live position read, homing, and configure
 ```
 
 By default, the smoke test uses motor IDs `0` through `12`. If you only want to
 test a subset, pass `--motors`, for example `--motors 0,1,2,3`. Do not leave
 Dynamixel Wizard open while running the API because it keeps the serial port
 busy.
-
-## Paxini Tactile Qt Tool
-
-The `midas_hand_api.tactile` module drives the Paxini GEN3 high-speed board
-(`PX6AX-GEN3-DP-S2015-Elite`) over USB serial using the `AA56` auto-push stream.
-The hardware layout is:
-
-| Finger | Force points | Board device address |
-|--------|--------------|----------------------|
-| thumb | 127 | 1 |
-| index | 52 | 2 |
-| middle | 52 | 3 |
-| ring | 52 | 4 |
-
-The board runs at `921600` baud and usually appears as `/dev/ttyACM0`, though
-`PaxiniConfig(port=None)` can auto-detect boards whose USB metadata contains
-`paxini`. `read_latest()` returns `dict[str, ndarray]` with each array shaped
-`(N, 3)` for `[Fx, Fy, Fz]` in Newtons.
-
-Standalone API usage:
-
-```python
-from midas_hand_api import PaxiniConfig, PaxiniHandSensor
-
-with PaxiniHandSensor(PaxiniConfig()) as sensor:
-    data = sensor.read_latest()
-    print(data["thumb"].shape)   # (127, 3)
-    print(data["index"].shape)   # (52, 3)
-```
-
-Paxini tactile tools now live under `midas_hand_api/tactile/`. The main Qt tool
-combines live streaming, CSV recording, and CSV replay in one local app.
-
-Install the optional Qt dependencies:
-
-```bash
-python -m pip install -e ".[qt]"
-```
-
-Run the tactile app from the `midas_hand_api` directory:
-
-```bash
-python -m midas_hand_api.tactile.paxini_tactile_qt
-```
-
-After installing the package, you can also use:
-
-```bash
-midas-paxini
-```
-
-Useful options:
-
-```bash
-python -m midas_hand_api.tactile.paxini_tactile_qt --port /dev/ttyACM0
-python -m midas_hand_api.tactile.paxini_tactile_qt --csv paxini_recording.csv
-python -m midas_hand_api.tactile.paxini_tactile_qt --replay-only --csv paxini_recording.csv
-```
-
-The old example-level web and split tactile scripts have been removed. See
-`midas_hand_api/tactile/README_paxini_qt_replay.md` for the current recording
-and replay workflow.
 
 ## First-Time Homing
 
@@ -196,9 +135,9 @@ with MidasHand(config) as hand:
     hand.configure(enable_torque=True)
     hand.set_motion_profile(
         # None or 0.0 disables velocity-profile limiting.
-        profile_velocity_rad_s=1.5,
+        profile_velocity_rad_s=2.5,
         # None or 0.0 disables acceleration profiling.
-        profile_acceleration_rad_s2=10.0,
+        profile_acceleration_rad_s2=30.0,
     )
     hand.set_positions(np.zeros(13))
     print(hand.read_pos())
@@ -207,13 +146,113 @@ with MidasHand(config) as hand:
 ```
 
 Joint directions follow the right-hand rule, with the thumb pointing along the
-servo horn axis. 
+servo horn axis.
 
 **NOTE:** For robot learning or teleoperated demonstrations,
-its recommended to disable motion profiling with `profile_velocity_rad_s=None` and
-`profile_acceleration_rad_s2=None`. This removes extra actuator-side trajectory
+disabling the motion profiling with `profile_velocity_rad_s=None` and
+`profile_acceleration_rad_s2=None` will maximize reactivity. This removes extra actuator-side trajectory
 shaping; motion is still subject to current limits, gains, update rate, and
 contact.
+
+## Tactile Sensors
+
+The `midas_hand_api.tactile` module drives the Paxini GEN3 high-speed board
+(`PX6AX-GEN3-DP-S2015-Elite`) over USB serial using the AA56 auto-push stream.
+
+### Hardware layout
+
+| Finger | Force points (N) | Board device address |
+|--------|-------------|----------------------|
+| thumb  | 127         | 1                    |
+| index  | 52          | 2                    |
+| middle | 52          | 3                    |
+| ring   | 52          | 4                    |
+
+The Paxini board connects via USB (typically `/dev/ttyACM0`) at 921 600 baud.
+Make sure your user is in the `dialout` group (see **Setup** above). If only one
+Paxini board is connected, `PaxiniConfig` will auto-detect the port; otherwise
+specify it explicitly.
+
+### Integrated with MidasHand
+
+```python
+from midas_hand_api import HandConfig, MidasHand, PaxiniConfig, PaxiniHandSensor
+
+hand_config = HandConfig.load()
+tactile = PaxiniHandSensor(PaxiniConfig())  # auto-detects port
+
+with MidasHand(hand_config, tactile_sensor=tactile) as hand:
+    hand.configure(enable_torque=True)
+    data = hand.read_tactile()     # dict[str, ndarray (N, 3)]
+    fz   = hand.read_tactile_fz() # dict[str, ndarray (N,)]
+```
+
+### Standalone usage
+
+```python
+from midas_hand_api import PaxiniConfig, PaxiniHandSensor
+
+with PaxiniHandSensor(PaxiniConfig()) as sensor:
+    data = sensor.read_latest()       # dict[finger_name, ndarray (N, 3)] — columns: [Fx, Fy, Fz] N
+    print(data["thumb"].shape)        # (127, 3)
+    print(data["index"].shape)        # (52, 3)
+
+    fz = sensor.read_tactile_fz()     # dict[finger_name, ndarray (N,)]
+    print(fz["index"])
+```
+
+`connect()` raises `RuntimeError` if any finger in `PaxiniConfig.fingers` is not
+physically connected. To use a subset:
+
+```python
+sensor = PaxiniHandSensor(PaxiniConfig(port="/dev/ttyACM0", fingers=["index", "middle"]))
+```
+
+### Key config options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `port` | auto-detect | Serial port, e.g. `"/dev/ttyACM0"` |
+| `fingers` | all four | Ordered list of fingers to read |
+| `publish_rate_hz` | `60.0` | Rate at which `read_latest()` delivers a new value |
+| `median_window` | `3` | Rolling median window for noise reduction; set `1` to disable |
+
+The reader thread consumes frames as fast as the board delivers them
+(hardware ceiling ~83.3 Hz). `publish_rate_hz` caps delivery independently.
+
+## Paxini Tactile Qt Tool
+
+Paxini tactile support lives under `midas_hand_api/tactile/`. The Qt tool
+combines live streaming, CSV recording, and CSV replay in one local app.
+
+Install the optional Qt dependencies:
+
+```bash
+pip install ".[qt]"    # or pip install -e ".[qt]" for a dev/editable install
+```
+
+Run the tactile app from the `midas_hand_api` directory:
+
+```bash
+python -m midas_hand_api.tactile.paxini_tactile_qt
+```
+
+After installing the package, you can also use:
+
+```bash
+midas-paxini
+```
+
+Useful options:
+
+```bash
+python -m midas_hand_api.tactile.paxini_tactile_qt --port /dev/ttyACM0
+python -m midas_hand_api.tactile.paxini_tactile_qt --csv paxini_recording.csv
+python -m midas_hand_api.tactile.paxini_tactile_qt --replay-only --csv paxini_recording.csv
+```
+
+See `midas_hand_api/tactile/README_paxini_qt_replay.md` for the full recording
+and replay workflow.
 
 ## XM335-T323-T Defaults
 

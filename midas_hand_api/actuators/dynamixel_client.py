@@ -317,20 +317,36 @@ class DynamixelClient:
         logging.error(error_message)
         return False
 
-    def ping(self, motor_ids: Optional[Sequence[int]] = None) -> Dict[int, int]:
-        """Ping motors and return ``{motor_id: model_number}`` for responders."""
+    def ping(
+        self,
+        motor_ids: Optional[Sequence[int]] = None,
+        retries: int = 3,
+        retry_interval: float = 0.05,
+    ) -> Dict[int, int]:
+        """Ping motors and return ``{motor_id: model_number}`` for responders.
+
+        Each motor is pinged up to ``retries + 1`` times before being declared
+        missing, sleeping ``retry_interval`` seconds between attempts. The SDK
+        ping is a single shot, so at high baudrates a lone dropped reply would
+        otherwise flag a present motor as absent; the gap also lets the bus
+        settle before re-trying.
+        """
 
         self.check_connected()
         found: Dict[int, int] = {}
         for motor_id in motor_ids if motor_ids is not None else self.motor_ids:
-            model, comm_result, dxl_error = self.packet_handler.ping(
-                self.port_handler, int(motor_id)
-            )
-            if comm_result == self.dxl.COMM_SUCCESS:
-                found[int(motor_id)] = int(model)
-                if dxl_error:
-                    error = self.packet_handler.getRxPacketError(dxl_error)
-                    logging.warning("ping: [Motor ID %s] %s", motor_id, error)
+            for attempt in range(retries + 1):
+                model, comm_result, dxl_error = self.packet_handler.ping(
+                    self.port_handler, int(motor_id)
+                )
+                if comm_result == self.dxl.COMM_SUCCESS:
+                    found[int(motor_id)] = int(model)
+                    if dxl_error:
+                        error = self.packet_handler.getRxPacketError(dxl_error)
+                        logging.warning("ping: [Motor ID %s] %s", motor_id, error)
+                    break
+                if attempt < retries and retry_interval > 0:
+                    time.sleep(retry_interval)
             else:
                 self.handle_packet_result(comm_result, dxl_error, int(motor_id), "ping")
         return found

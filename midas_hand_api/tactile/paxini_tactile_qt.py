@@ -797,6 +797,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--serial-settle", type=float, default=0.75)
     parser.add_argument("--response-timeout", type=float, default=1.0)
     parser.add_argument("--startup-attempts", type=int, default=3)
+    parser.add_argument(
+        "--recalibrate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Recalibrate (re-zero) the sensors on startup with nothing touching "
+        "them. Use --no-recalibrate to skip.",
+    )
     parser.add_argument("--csv", type=Path, default=Path("paxini_recording.csv"))
     parser.add_argument("--replay-only", action="store_true", help="Skip hardware and open CSV replay only.")
     parser.add_argument("--component", choices=COMPONENT_CHOICES, default="Fz")
@@ -836,6 +843,9 @@ def main() -> None:
         sensor.connect()
         print(f"Paxini connected on {sensor.port}")
         print(f"Reading fingers: {', '.join(args.fingers)}")
+        if args.recalibrate:
+            print("Recalibrating sensors — make sure nothing is touching them...")
+            sensor.recalibrate()
         initial_data = wait_for_first_sample(sensor.read_latest)
         get_live_data = sensor.read_latest
         if args.csv.expanduser().exists():

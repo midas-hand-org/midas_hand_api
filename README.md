@@ -53,7 +53,7 @@ needs to be unplugged and replugged.
 ```bash
 source .venv/bin/activate
 python examples/smoke_test.py
-python -m midas_hand_api --help  # see options for motor scan, live position read, homing, and configure
+python -m midas_hand_api --help  # see options for motor scan, live position read, homing, configure, tactile recalibration, etc.
 ```
 
 By default, the smoke test uses motor IDs `0` through `12`. If you only want to
@@ -183,6 +183,7 @@ tactile = PaxiniHandSensor(PaxiniConfig())  # auto-detects port
 
 with MidasHand(hand_config, tactile_sensor=tactile) as hand:
     hand.configure(enable_torque=True)
+    hand.recalibrate_tactile()     # re-zero tactile sensors — make sure nothing is touching them
     data = hand.read_tactile()     # dict[str, ndarray (N, 3)]
     fz   = hand.read_tactile_fz() # dict[str, ndarray (N,)]
 ```
@@ -193,6 +194,7 @@ with MidasHand(hand_config, tactile_sensor=tactile) as hand:
 from midas_hand_api import PaxiniConfig, PaxiniHandSensor
 
 with PaxiniHandSensor(PaxiniConfig()) as sensor:
+    sensor.recalibrate()              # re-zero tactile sensors — make sure nothing is touching them
     data = sensor.read_latest()       # dict[finger_name, ndarray (N, 3)] — columns: [Fx, Fy, Fz] N
     print(data["thumb"].shape)        # (127, 3)
     print(data["index"].shape)        # (52, 3)
@@ -200,6 +202,13 @@ with PaxiniHandSensor(PaxiniConfig()) as sensor:
     fz = sensor.read_tactile_fz()     # dict[finger_name, ndarray (N,)]
     print(fz["index"])
 ```
+
+> **Habit:** call `recalibrate()` (or `hand.recalibrate_tactile()`) once right
+> after connecting, with nothing touching the sensors. It re-zeros every
+> connected sensor's distributed-force baseline so each run starts from a clean
+> zero. Any contact present at call time becomes the new zero, so keep the
+> fingertips clear. The Qt tool does this automatically on startup; pass
+> `--no-recalibrate` to skip it.
 
 `connect()` raises `RuntimeError` if any finger in `PaxiniConfig.fingers` is not
 physically connected. To use a subset:

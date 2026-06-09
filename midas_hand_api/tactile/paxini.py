@@ -46,6 +46,10 @@ _FRAME_HEAD_REQUEST = b"\x55\xAA"
 _ENABLE_AUTO_PUSH = bytes.fromhex("55AA00101700010001D8")
 _DISABLE_AUTO_PUSH = bytes.fromhex("55AA00101700010000D9")
 
+# Instruction 0x0017, register 0x0002: tell the high-speed board to recalibrate
+# (re-zero) every connected Paxini sensor to its current no-load baseline.
+_RECALIBRATE = bytes.fromhex("55AA00170200010001E6")
+
 # Register 0x0016: controls what the board includes in each auto-push frame.
 # 0x03 = resultant force (6 bytes/finger) + distributed force (N*3 bytes/finger).
 _ADDR_DATA_TYPE = 0x0016
@@ -643,6 +647,37 @@ class PaxiniHandSensor:
     def close(self) -> None:
         """Alias for disconnect(), for compatibility with MidasHand.close()."""
         self.disconnect()
+
+    def recalibrate(self, settle_s: float = 0.5) -> None:
+        """Recalibrate (re-zero) all connected Paxini sensors.
+
+        Sends the board's recalibration command, which resets every connected
+        sensor's distributed-force baseline to the current no-load reading.
+        Run this with **nothing touching the sensors**; any contact present at
+        call time becomes the new zero.
+
+        Args:
+            settle_s: Seconds to wait after sending so the board applies the new
+                baseline before downstream reads.
+
+        Raises:
+            RuntimeError: If the serial port is not open (call connect() first).
+        """
+        if self._serial is None or not self._serial.is_open:
+            raise RuntimeError(
+                "Cannot recalibrate: PaxiniHandSensor is not connected. "
+                "Call connect() first."
+            )
+        try:
+            # No-ack write, matching the startup sequence: some Paxini CDC
+            # adapters mistime ACK responses, so we don't wait for one.
+            self._serial.write(_RECALIBRATE)
+            self._serial.flush()
+        except (OSError, serial.SerialException) as exc:
+            raise _serial_io_error(self._serial, "sending recalibrate command", exc) from exc
+        logger.info("Sent Paxini recalibration command to all connected sensors")
+        if settle_s > 0:
+            time.sleep(settle_s)
 
     def read_latest(self) -> dict[str, np.ndarray]:
         """Return the latest tactile frame.

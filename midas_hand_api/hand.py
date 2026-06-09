@@ -39,7 +39,12 @@ class MidasHand:
             self.connect()
 
     def connect(self) -> None:
-        """Connect to the configured port, or auto-select a responding bus."""
+        """Connect to the configured port, or auto-select a responding bus.
+
+        Also connects an attached tactile sensor once the Dynamixel bus is up,
+        so a hand built with ``tactile_sensor=...`` is ready to read tactile data
+        without a separate ``sensor.connect()`` call.
+        """
 
         ports = [self.port] if self.port else discover_ports()
         if not ports:
@@ -93,15 +98,20 @@ class MidasHand:
                         sorted(scan_result),
                         missing,
                     )
-                return
+                break
             except Exception as exc:
                 last_error = exc
-        if self.config.port is None and last_error is None:
-            raise OSError(
-                "No configured motor IDs responded on candidate ports "
-                f"{checked_ports}"
-            )
-        raise OSError(f"Could not connect to Midas hand. Last error: {last_error}")
+        else:
+            if self.config.port is None and last_error is None:
+                raise OSError(
+                    "No configured motor IDs responded on candidate ports "
+                    f"{checked_ports}"
+                )
+            raise OSError(f"Could not connect to Midas hand. Last error: {last_error}")
+
+        # Dynamixel bus is up; bring up the tactile sensor if one is attached.
+        if self.tactile_sensor is not None and not self.tactile_sensor.is_connected:
+            self.tactile_sensor.connect()
 
     @property
     def is_connected(self) -> bool:
@@ -155,10 +165,12 @@ class MidasHand:
         if enable_torque:
             client.set_torque_enabled(self.motor_ids, True)
 
-    def ping(self) -> dict[int, int]:
+    def ping(self, retries: int = 3, retry_interval: float = 0.05) -> dict[int, int]:
         """Return motor IDs that respond, mapped to model numbers."""
 
-        return self._client().ping(self.motor_ids)
+        return self._client().ping(
+            self.motor_ids, retries=retries, retry_interval=retry_interval
+        )
 
     def read_hardware_error_status(self) -> dict[int, int]:
         """Return Hardware Error Status(70) for active motors."""
@@ -341,6 +353,15 @@ class MidasHand:
         if self.tactile_sensor is None:
             raise OSError("No tactile sensor is configured")
         return self.tactile_sensor.read_tactile_fz()
+
+    def recalibrate_tactile(self, settle_s: float = 1.0) -> None:
+        """Recalibrate (re-zero) all connected tactile sensors.
+
+        Run with nothing touching the sensors. Raises if no sensor is configured.
+        """
+        if self.tactile_sensor is None:
+            raise OSError("No tactile sensor is configured")
+        self.tactile_sensor.recalibrate(settle_s=settle_s)
 
     def _read_motor_pos(self) -> np.ndarray:
         return self._raw_to_motor_pos(self._client().read_pos())

@@ -122,6 +122,17 @@ def main() -> None:
         action="store_true",
         help="Print expanded joint positions, including passive DIP joints",
     )
+    parser.add_argument(
+        "--recalibrate",
+        action="store_true",
+        help="Recalibrate (re-zero) the Paxini tactile sensors and exit. "
+        "Does not connect the Dynamixel bus or move any actuators.",
+    )
+    parser.add_argument(
+        "--paxini-port",
+        default=None,
+        help="Paxini tactile board serial port (auto-detected if omitted)",
+    )
     parser.add_argument("--home", action="store_true", help="Run full hand homing sequence and save config")
     parser.add_argument("--home-thumb", action="store_true", help="Run thumb homing sequence and save config")
     parser.add_argument("--home-fingers", action="store_true", help="Run finger homing sequence and save config")
@@ -177,6 +188,22 @@ def main() -> None:
                 print(f"  Responding : {sorted(ping_result.keys())}")
                 if ping_result:
                     print(f"  Models     : {ping_result}")
+        return
+
+    if args.recalibrate:
+        from .tactile import PaxiniConfig, PaxiniHandSensor
+
+        sensor = PaxiniHandSensor(PaxiniConfig(port=args.paxini_port))
+        try:
+            sensor.connect()
+            print(f"Paxini connected on {sensor.port}")
+            print(
+                "Recalibrating tactile sensors — make sure nothing is touching them..."
+            )
+            sensor.recalibrate()
+            print("Tactile sensors recalibrated.")
+        finally:
+            sensor.disconnect()
         return
 
     homing_requested = args.home or args.home_thumb or args.home_fingers

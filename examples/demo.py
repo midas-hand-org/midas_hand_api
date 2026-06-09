@@ -1,12 +1,11 @@
-"""Full tactile demo: finger-touch sequence followed by Kapandji sweep.
+"""Demo: finger-touch sequence followed by Kapandji sweep, repeated in a loop.
 
 Usage::
 
     python examples/demo.py
     python examples/demo.py --hand-port /dev/ttyUSB0
-    python examples/demo.py --paxini-port /dev/ttyACM0
 
-For local Qt tactile visualization, run
+For live tactile visualization, run
 ``python -m midas_hand_api.tactile.paxini_tactile_qt`` in a separate terminal.
 """
 
@@ -18,7 +17,6 @@ import numpy as np
 import finger_touch
 import kapandji_test as kapandji
 from midas_hand_api import DEFAULT_CONFIG_PATH, HandConfig, MidasHand
-from midas_hand_api.tactile import PaxiniConfig, PaxiniHandSensor
 
 
 def load_config(hand_port: str | None) -> HandConfig:
@@ -53,40 +51,39 @@ def run_kapandji(hand: MidasHand) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--paxini-port", default=None, help="Paxini serial port (auto-detected if omitted)")
     parser.add_argument("--hand-port", default=None, help="Dynamixel hand port (auto-detected if omitted)")
     args = parser.parse_args()
 
-    sensor = PaxiniHandSensor(PaxiniConfig(port=args.paxini_port))  # port=None → auto-detect
-    sensor.connect()
     hand: MidasHand | None = None
     try:
-        hand = MidasHand(load_config(args.hand_port), tactile_sensor=sensor)
+        hand = MidasHand(load_config(args.hand_port))
         print(f"Hand connected on {hand.port}")
-        print(f"Paxini connected on {sensor.port}")
 
         hand.configure(enable_torque=False)
         hand.enable_torque()
-        hand.set_motion_profile(
-            profile_velocity_rad_s=1.5,
-            profile_acceleration_rad_s2=50.0,
-            motor_ids=hand.motor_ids,
-        )
 
         time.sleep(1.0)
 
-        print("\n=== Finger-touch sequence ===")
-        finger_touch.run_sequence(hand)
+        while True:
+            hand.set_motion_profile(
+                profile_velocity_rad_s=3.5,
+                profile_acceleration_rad_s2=30.0,
+                motor_ids=hand.motor_ids,
+            )
 
-        hand.set_motion_profile(
-            profile_velocity_rad_s=3.0,
-            profile_acceleration_rad_s2=20.0,
-            motor_ids=hand.motor_ids,
-        )
+            print("\n=== Finger-touch sequence ===")
+            finger_touch.run_sequence(hand)
 
-        run_kapandji(hand)
+            hand.set_motion_profile(
+                profile_velocity_rad_s=3.5,
+                profile_acceleration_rad_s2=30.0,
+                motor_ids=hand.motor_ids,
+            )
 
-        time.sleep(100.0)
+            run_kapandji(hand)
+
+            print("\nRestarting in 7 s...")
+            time.sleep(7.0)
 
     except KeyboardInterrupt:
         print("\nInterrupted.")
@@ -94,8 +91,6 @@ def main() -> None:
         print("Disabling torque. Please wait...")
         if hand is not None:
             hand.shutdown()
-        else:
-            sensor.disconnect()
 
 
 if __name__ == "__main__":

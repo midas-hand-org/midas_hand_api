@@ -63,7 +63,7 @@ def command_and_wait(hand: MidasHand, target: np.ndarray) -> None:
     hand.set_positions(target, clip=True)
     if not hand.wait_until_reached(
         target,
-        tolerance_rad=0.05,
+        tolerance_rad=0.1,
         velocity_threshold_rad_s=0.05,
         timeout_s=6.0,
         poll_interval_s=0.01,
@@ -120,15 +120,17 @@ def main() -> None:
         )
 
         time.sleep(1.0)
+        while True:
+            target = np.zeros(len(hand.motor_ids))
+            previous_finger_name = None
+            for finger_name in ("index", "middle", "ring"):
+                run_finger_sequence(hand, finger_name, target, previous_finger_name)
+                previous_finger_name = finger_name
 
-        target = np.zeros(len(hand.motor_ids))
-        previous_finger_name = None
-        for finger_name in ("index", "middle", "ring"):
-            run_finger_sequence(hand, finger_name, target, previous_finger_name)
-            previous_finger_name = finger_name
+            print("Returning all motors to software zero.")
+            command_and_wait(hand, np.zeros(len(hand.motor_ids)))
+            time.sleep(5.0)
 
-        print("Returning all motors to software zero.")
-        command_and_wait(hand, np.zeros(len(hand.motor_ids)))
     except KeyboardInterrupt:
         print("Interrupted; disabling torque.")
     finally:

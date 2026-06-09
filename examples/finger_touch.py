@@ -1,17 +1,14 @@
-"""Finger-touch sequence with live Paxini tactile feedback.
+"""Finger-touch sequence example.
 
 Moves each finger to the Kapandji target position while placing the thumb at
-the corresponding recorded touch waypoint. A Paxini tactile sensor is required;
-force data is read through ``MidasHand.read_tactile()`` and summarized in the
-terminal.
+the corresponding recorded touch waypoint.
 
 Usage::
 
     python examples/finger_touch.py
     python examples/finger_touch.py --hand-port /dev/ttyUSB0
-    python examples/finger_touch.py --paxini-port /dev/ttyACM0
 
-For local Qt tactile visualization, run
+For live tactile visualization, run
 ``python -m midas_hand_api.tactile.paxini_tactile_qt`` in a separate terminal.
 """
 
@@ -21,7 +18,6 @@ import time
 import numpy as np
 
 from midas_hand_api import DEFAULT_CONFIG_PATH, HandConfig, MidasHand
-from midas_hand_api.tactile import PaxiniConfig, PaxiniHandSensor
 
 
 THUMB_IDS = (0, 1, 2, 3)
@@ -61,47 +57,23 @@ def set_targets(
         target[hand.motor_ids.index(mid)] = val
 
 
-def tactile_summary(data: dict[str, np.ndarray]) -> str:
-    """Return a compact max-force summary for terminal feedback."""
-    parts = []
-    for name, vectors in data.items():
-        max_force = np.linalg.norm(vectors, axis=1).max(initial=0.0)
-        max_fz = vectors[:, 2].max(initial=0.0)
-        parts.append(f"{name}: |F|max={max_force:.2f} N, Fzmax={max_fz:.2f} N")
-    return "  |  ".join(parts)
-
-
-def print_tactile(hand: MidasHand, prefix: str) -> None:
-    try:
-        print(f"    {prefix}: {tactile_summary(hand.read_tactile())}")
-    except RuntimeError as exc:
-        print(f"    {prefix}: waiting for data ({exc})")
-
-
-def move_and_wait(hand: MidasHand, target: np.ndarray, label: str, hold_s: float = 2.0) -> None:
+def move_and_wait(hand: MidasHand, target: np.ndarray, label: str, hold_s: float = 0.0) -> None:
     print(f"  -> {label}")
     hand.set_positions(target, clip=True)
     deadline = time.monotonic() + 6.0
     reached = False
-    next_tactile_print = 0.0
 
     while time.monotonic() < deadline:
         pos, vel, _cur = hand.read_pos_vel_cur()
-        position_reached = np.all(np.abs(target - pos) <= 0.1)
+        position_reached = np.all(np.abs(target - pos) <= 0.2)
         velocity_settled = np.all(np.abs(vel) <= 0.1)
         if position_reached and velocity_settled:
             reached = True
             break
-
-        if time.monotonic() >= next_tactile_print:
-            print_tactile(hand, "tactile")
-            next_tactile_print = time.monotonic() + 0.5
-
         time.sleep(0.02)
 
     if not reached:
         print("    Warning: target not reached within 6 s.")
-    print_tactile(hand, "final tactile")
     if hold_s > 0:
         time.sleep(hold_s)
 
@@ -113,16 +85,11 @@ def run_sequence(hand: MidasHand) -> None:
     for finger_name in SEQUENCE:
         finger_ids = FINGER_IDS[finger_name]
 
-        # Step 1: release previous finger and move thumb to touch position.
         if prev_finger is not None:
             set_targets(target, hand, FINGER_IDS[prev_finger], np.zeros(3))
         set_targets(target, hand, THUMB_IDS, THUMB_TOUCH[finger_name])
-        move_and_wait(hand, target, f"thumb → {np.round(THUMB_TOUCH[finger_name], 4)}", hold_s=0.0)
-
-        # Step 2: bring finger to target.
         set_targets(target, hand, finger_ids, FINGER_TARGET_RAD)
-        move_and_wait(hand, target, f"{finger_name} → target")
-
+        move_and_wait(hand, target, f"{finger_name} touch")
         prev_finger = finger_name
 
     print("Returning to zero.")
@@ -131,17 +98,13 @@ def run_sequence(hand: MidasHand) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--paxini-port", default=None, help="Paxini serial port (auto-detected if omitted)")
     parser.add_argument("--hand-port", default=None, help="Serial port for Dynamixel hand (auto-detected if omitted)")
     args = parser.parse_args()
 
-    sensor = PaxiniHandSensor(PaxiniConfig(port=args.paxini_port))  # port=None → auto-detect
-    sensor.connect()
     hand: MidasHand | None = None
     try:
-        hand = MidasHand(load_config(args.hand_port), tactile_sensor=sensor)
+        hand = MidasHand(load_config(args.hand_port))
         print(f"Hand connected on {hand.port}")
-        print(f"Paxini connected on {sensor.port}")
 
         hand.configure(enable_torque=False)
 
@@ -161,8 +124,6 @@ def main() -> None:
         print("Disabling torque. Please wait...")
         if hand is not None:
             hand.shutdown()
-        else:
-            sensor.disconnect()
 
 
 if __name__ == "__main__":
